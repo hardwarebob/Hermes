@@ -8,6 +8,8 @@
 #include "src/logging.h"
 
 #include <atomic>
+#include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <thread>
 #include <utility>
@@ -43,17 +45,57 @@ namespace platf {
     };
 
 #ifdef SUNSHINE_BUILD_SDBUS
-    constexpr auto kwin_service = "org.kde.KWin";
-    constexpr auto kwin_remote_path = "/RemoteSessions";
-    constexpr auto kwin_remote_iface = "org.kde.KWin.RemoteSessions";
+    struct dbus_compositor_spec_t {
+      const char *service;
+      const char *path;
+      const char *iface;
+      const char *register_method;
+      const char *unregister_method;
+      const char *set_policies_method;
+      const char *disconnect_signal;
+      const char *screensaver_service;
+      const char *screensaver_path;
+      const char *screensaver_iface;
+    };
 
-    class kwin_remote_session_controller_t : public local_session_controller_t {
+    constexpr dbus_compositor_spec_t kwin_spec {
+      "org.kde.KWin",
+      "/RemoteSessions",
+      "org.kde.KWin.RemoteSessions",
+      "registerSession",
+      "unregisterSession",
+      "setOutputPolicies",
+      "disconnectRequested",
+      "org.freedesktop.ScreenSaver",
+      "/ScreenSaver",
+      "org.freedesktop.ScreenSaver",
+    };
+
+    constexpr dbus_compositor_spec_t mutter_spec {
+      "org.gnome.Mutter.RemoteSessions",
+      "/RemoteSessions",
+      "org.gnome.Mutter.RemoteSessions",
+      "RegisterSession",
+      "UnregisterSession",
+      "SetOutputPolicies",
+      "DisconnectRequested",
+      "org.gnome.ScreenSaver",
+      "/org/gnome/ScreenSaver",
+      "org.gnome.ScreenSaver",
+    };
+
+    class dbus_remote_session_controller_t final : public local_session_controller_t {
     public:
-      kwin_remote_session_controller_t(std::string mode_name, bool configure_output_policies) :
+      dbus_remote_session_controller_t(
+        std::string mode_name,
+        const dbus_compositor_spec_t &spec,
+        bool configure_output_policies
+      ) :
           m_name(std::move(mode_name)),
+          m_spec(spec),
           m_configure_output_policies(configure_output_policies) {}
 
-      ~kwin_remote_session_controller_t() override {
+      ~dbus_remote_session_controller_t() override {
         on_stream_stopping();
       }
 
@@ -70,8 +112,8 @@ namespace platf {
         sd_bus_message *reply = nullptr;
         const int rc = sd_bus_call_method(
           bus,
-          kwin_service,
-          kwin_remote_path,
+          m_spec.service,
+          m_spec.path,
           "org.freedesktop.DBus.Introspectable",
           "Introspect",
           &err,
@@ -108,10 +150,10 @@ namespace platf {
         sd_bus_message *reply = nullptr;
         const int rc = sd_bus_call_method(
           m_bus,
-          kwin_service,
-          kwin_remote_path,
-          kwin_remote_iface,
-          "registerSession",
+          m_spec.service,
+          m_spec.path,
+          m_spec.iface,
+          m_spec.register_method,
           &err,
           &reply,
           "sss",
@@ -120,7 +162,8 @@ namespace platf {
           m_output_name.c_str()
         );
         if (rc < 0) {
-          BOOST_LOG(warning) << m_name << ": registerSession failed: " << (err.message ? err.message : strerror(-rc));
+          BOOST_LOG(warning) << m_name << ": " << m_spec.register_method
+                             << " failed: " << (err.message ? err.message : strerror(-rc));
           sd_bus_error_free(&err);
           sd_bus_message_unref(reply);
           sd_bus_unref(m_bus);
@@ -139,9 +182,9 @@ namespace platf {
           sd_bus_error lock_err = SD_BUS_ERROR_NULL;
           sd_bus_call_method(
             m_bus,
-            "org.freedesktop.ScreenSaver",
-            "/ScreenSaver",
-            "org.freedesktop.ScreenSaver",
+            m_spec.screensaver_service,
+            m_spec.screensaver_path,
+            m_spec.screensaver_iface,
             "Lock",
             &lock_err,
             nullptr,
@@ -153,11 +196,11 @@ namespace platf {
         sd_bus_match_signal(
           m_bus,
           &m_signal_slot,
-          kwin_service,
-          kwin_remote_path,
-          kwin_remote_iface,
-          "disconnectRequested",
-          &kwin_remote_session_controller_t::on_disconnect_signal,
+          m_spec.service,
+          m_spec.path,
+          m_spec.iface,
+          m_spec.disconnect_signal,
+          &dbus_remote_session_controller_t::on_disconnect_signal,
           this
         );
 
@@ -195,10 +238,10 @@ namespace platf {
           sd_bus_error err = SD_BUS_ERROR_NULL;
           sd_bus_call_method(
             m_bus,
-            kwin_service,
-            kwin_remote_path,
-            kwin_remote_iface,
-            "unregisterSession",
+            m_spec.service,
+            m_spec.path,
+            m_spec.iface,
+            m_spec.unregister_method,
             &err,
             nullptr,
             "s",
@@ -222,7 +265,7 @@ namespace platf {
 
     private:
       static int on_disconnect_signal(sd_bus_message *m, void *userdata, sd_bus_error *) {
-        auto *self = static_cast<kwin_remote_session_controller_t *>(userdata);
+        auto *self = static_cast<dbus_remote_session_controller_t *>(userdata);
         const char *sid = nullptr;
         if (sd_bus_message_read(m, "s", &sid) >= 0 && sid && self->m_session_id == sid) {
           BOOST_LOG(info) << self->m_name << ": disconnectRequested received for session " << sid;
@@ -233,14 +276,14 @@ namespace platf {
         return 0;
       }
 
-      static void set_output_policies(sd_bus *bus, const std::string &output_name, bool unlocked, bool always_on) {
+      void set_output_policies(sd_bus *bus, const std::string &output_name, bool unlocked, bool always_on) const {
         sd_bus_error err = SD_BUS_ERROR_NULL;
         sd_bus_call_method(
           bus,
-          kwin_service,
-          kwin_remote_path,
-          kwin_remote_iface,
-          "setOutputPolicies",
+          m_spec.service,
+          m_spec.path,
+          m_spec.iface,
+          m_spec.set_policies_method,
           &err,
           nullptr,
           "sbb",
@@ -252,11 +295,142 @@ namespace platf {
       }
 
       std::string m_name;
+      dbus_compositor_spec_t m_spec;
       bool m_configure_output_policies;
       std::mutex m_mutex;
       sd_bus *m_bus {nullptr};
       sd_bus_slot *m_signal_slot {nullptr};
       std::string m_session_id;
+      std::string m_output_name;
+      std::function<void()> m_on_disconnect;
+      std::atomic<bool> m_running {false};
+      std::thread m_worker;
+    };
+
+    class wlroots_session_controller_t final : public local_session_controller_t {
+    public:
+      ~wlroots_session_controller_t() override {
+        on_stream_stopping();
+      }
+
+      std::string_view name() const override {
+        return "wlroots_per_output_lock";
+      }
+
+      bool is_available() const override {
+        const char *swaysock = std::getenv("SWAYSOCK");
+        return swaysock && *swaysock;
+      }
+
+      bool on_stream_starting(
+        const std::string &client_name,
+        const std::string &output_name,
+        std::function<void()> on_disconnect
+      ) override {
+        on_stream_stopping();
+
+        std::lock_guard lg(m_mutex);
+        m_output_name = output_name;
+        m_client_name = client_name.empty() ? "Client" : client_name;
+        m_session_id = "hermes-wlroots-1";
+        m_on_disconnect = std::move(on_disconnect);
+
+        if (!m_output_name.empty()) {
+          std::string cmd = "swaymsg output '" + m_output_name + "' unlocked_while_locked on >/dev/null 2>&1";
+          std::system(cmd.c_str());
+        }
+
+        if (platf::open_user_bus(&m_bus) >= 0 && m_bus) {
+          static const sd_bus_vtable vtable[] = {
+            SD_BUS_VTABLE_START(0),
+            SD_BUS_PROPERTY("ActiveSessions", "aa{sv}", &wlroots_session_controller_t::prop_active_sessions, 0, SD_BUS_VTABLE_PROPERTY_EMITS_CHANGE),
+            SD_BUS_METHOD("RequestDisconnect", "s", "", &wlroots_session_controller_t::method_request_disconnect, SD_BUS_VTABLE_UNPRIVILEGED),
+            SD_BUS_SIGNAL("DisconnectRequested", "s", 0),
+            SD_BUS_VTABLE_END,
+          };
+          if (sd_bus_add_object_vtable(m_bus, &m_vtable_slot, "/RemoteSessions", "org.freedesktop.RemoteSessions", vtable, this) >= 0) {
+            sd_bus_request_name(m_bus, "org.freedesktop.RemoteSessions", 0);
+            m_running.store(true, std::memory_order_release);
+            m_worker = std::thread([this] {
+              while (m_running.load(std::memory_order_acquire)) {
+                int r = sd_bus_process(m_bus, nullptr);
+                if (r > 0) {
+                  continue;
+                }
+                if (r < 0) {
+                  break;
+                }
+                sd_bus_wait(m_bus, 200000);
+              }
+            });
+          }
+        }
+
+        std::system("loginctl lock-session >/dev/null 2>&1 || swaylock -f >/dev/null 2>&1 &");
+        BOOST_LOG(info) << "wlroots_per_output_lock: active for output '" << m_output_name << "'";
+        return true;
+      }
+
+      void on_stream_stopping() override {
+        m_running.store(false, std::memory_order_release);
+        if (m_worker.joinable()) {
+          m_worker.join();
+        }
+
+        std::lock_guard lg(m_mutex);
+        if (!m_output_name.empty()) {
+          std::string cmd = "swaymsg output '" + m_output_name + "' unlocked_while_locked off >/dev/null 2>&1";
+          std::system(cmd.c_str());
+          m_output_name.clear();
+        }
+        if (m_vtable_slot) {
+          sd_bus_slot_unref(m_vtable_slot);
+          m_vtable_slot = nullptr;
+        }
+        if (m_bus) {
+          sd_bus_release_name(m_bus, "org.freedesktop.RemoteSessions");
+          sd_bus_unref(m_bus);
+          m_bus = nullptr;
+        }
+        m_session_id.clear();
+      }
+
+    private:
+      static int prop_active_sessions(sd_bus *, const char *, const char *, const char *, sd_bus_message *reply, void *userdata, sd_bus_error *) {
+        auto *self = static_cast<wlroots_session_controller_t *>(userdata);
+        int r = sd_bus_message_open_container(reply, 'a', "a{sv}");
+        if (r < 0) {
+          return r;
+        }
+        if (!self->m_session_id.empty()) {
+          r = sd_bus_message_open_container(reply, 'a', "{sv}");
+          if (r >= 0) {
+            sd_bus_message_append(reply, "{sv}", "id", "s", self->m_session_id.c_str());
+            sd_bus_message_append(reply, "{sv}", "provider", "s", "Hermes");
+            sd_bus_message_append(reply, "{sv}", "clientName", "s", self->m_client_name.c_str());
+            sd_bus_message_append(reply, "{sv}", "outputName", "s", self->m_output_name.c_str());
+            sd_bus_message_close_container(reply);
+          }
+        }
+        return sd_bus_message_close_container(reply);
+      }
+
+      static int method_request_disconnect(sd_bus_message *m, void *userdata, sd_bus_error *) {
+        auto *self = static_cast<wlroots_session_controller_t *>(userdata);
+        const char *sid = nullptr;
+        if (sd_bus_message_read(m, "s", &sid) >= 0 && sid && self->m_session_id == sid) {
+          if (self->m_on_disconnect) {
+            self->m_on_disconnect();
+          }
+        }
+        return sd_bus_reply_method_return(m, "");
+      }
+
+      std::mutex m_mutex;
+      sd_bus *m_bus {nullptr};
+      sd_bus_slot *m_vtable_slot {nullptr};
+      std::string m_session_id;
+      std::string m_client_name;
       std::string m_output_name;
       std::function<void()> m_on_disconnect;
       std::atomic<bool> m_running {false};
@@ -269,15 +443,32 @@ namespace platf {
   std::unique_ptr<local_session_controller_t> create_local_session_controller(const std::string &mode) {
 #ifdef SUNSHINE_BUILD_SDBUS
     if (mode == "kwin_per_output_lock") {
-      return std::make_unique<kwin_remote_session_controller_t>("kwin_per_output_lock", true);
+      return std::make_unique<dbus_remote_session_controller_t>("kwin_per_output_lock", kwin_spec, true);
     }
     if (mode == "kwin_standalone_session") {
-      return std::make_unique<kwin_remote_session_controller_t>("kwin_standalone_session", false);
+      return std::make_unique<dbus_remote_session_controller_t>("kwin_standalone_session", kwin_spec, false);
+    }
+    if (mode == "mutter_per_output_lock") {
+      return std::make_unique<dbus_remote_session_controller_t>("mutter_per_output_lock", mutter_spec, true);
+    }
+    if (mode == "mutter_standalone_session") {
+      return std::make_unique<dbus_remote_session_controller_t>("mutter_standalone_session", mutter_spec, false);
+    }
+    if (mode == "wlroots_per_output_lock") {
+      return std::make_unique<wlroots_session_controller_t>();
     }
     if (mode == "auto") {
-      auto kwin = std::make_unique<kwin_remote_session_controller_t>("kwin_per_output_lock", true);
+      auto kwin = std::make_unique<dbus_remote_session_controller_t>("kwin_per_output_lock", kwin_spec, true);
       if (kwin->is_available()) {
         return kwin;
+      }
+      auto mutter = std::make_unique<dbus_remote_session_controller_t>("mutter_per_output_lock", mutter_spec, true);
+      if (mutter->is_available()) {
+        return mutter;
+      }
+      auto wlroots = std::make_unique<wlroots_session_controller_t>();
+      if (wlroots->is_available()) {
+        return wlroots;
       }
     }
 #endif

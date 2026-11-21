@@ -33,10 +33,13 @@ namespace platf {
 
   /**
    * @brief Selects a local session controller matching `mode`:
-   *   - "auto": chooses the best available backend (currently kwin_per_output_lock if present, else none/disable_outputs)
+   *   - "auto": chooses the best available backend (KWin -> Mutter -> wlroots/Sway -> none)
    *   - "none" / "disable_outputs": no-op controller (relies on standard virtual-display output handling)
    *   - "kwin_per_output_lock": Mode A via org.kde.KWin.RemoteSessions
    *   - "kwin_standalone_session": Mode B via standalone kwin_wayland + org.kde.KWin.RemoteSessions
+   *   - "mutter_per_output_lock": Mode A via org.gnome.Mutter.RemoteSessions
+   *   - "mutter_standalone_session": Mode B via standalone mutter + org.gnome.Mutter.RemoteSessions
+   *   - "wlroots_per_output_lock": Mode A via Sway/wlroots output unlocked_while_locked + org.freedesktop.RemoteSessions
    */
   std::unique_ptr<local_session_controller_t> create_local_session_controller(const std::string &mode);
 
