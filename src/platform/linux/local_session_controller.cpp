@@ -104,21 +104,6 @@ namespace platf {
           set_output_policies(m_bus, m_output_name, true, true);
         }
 
-        if (m_configure_output_policies) {
-          sd_bus_error lock_err = SD_BUS_ERROR_NULL;
-          sd_bus_call_method(
-            m_bus,
-            "org.freedesktop.ScreenSaver",
-            "/ScreenSaver",
-            "org.freedesktop.ScreenSaver",
-            "Lock",
-            &lock_err,
-            nullptr,
-            ""
-          );
-          sd_bus_error_free(&lock_err);
-        }
-
         sd_bus_error err = SD_BUS_ERROR_NULL;
         sd_bus_message *reply = nullptr;
         const int rc = sd_bus_call_method(
@@ -149,6 +134,21 @@ namespace platf {
         }
         sd_bus_message_unref(reply);
         sd_bus_error_free(&err);
+
+        if (m_configure_output_policies) {
+          sd_bus_error lock_err = SD_BUS_ERROR_NULL;
+          sd_bus_call_method(
+            m_bus,
+            "org.freedesktop.ScreenSaver",
+            "/ScreenSaver",
+            "org.freedesktop.ScreenSaver",
+            "Lock",
+            &lock_err,
+            nullptr,
+            ""
+          );
+          sd_bus_error_free(&lock_err);
+        }
 
         sd_bus_match_signal(
           m_bus,
