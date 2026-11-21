@@ -3694,7 +3694,11 @@ namespace proc {
             VDISPLAY::changeDisplaySettings2(vdisplayName.c_str(), render_width, render_height, target_fps, true);
 #else
             VDISPLAY::changeDisplaySettings2(vdisplayName.c_str(), render_width, render_height, target_fps, true);
-            if (config::video.session_privacy_mode != "kwin_per_output_lock" &&
+            const bool per_output_lock_mode =
+              config::video.session_privacy_mode == "kwin_per_output_lock" ||
+              config::video.session_privacy_mode == "mutter_per_output_lock" ||
+              config::video.session_privacy_mode == "wlroots_per_output_lock";
+            if (!per_output_lock_mode &&
                 !VDISPLAY::enableExclusiveVirtualDisplay(vdisplayName)) {
               BOOST_LOG(warning) << "Virtual display is active, but exclusive mode could not disable physical outputs.";
             }

@@ -1282,7 +1282,16 @@ namespace config {
       vars,
       "session_privacy_mode",
       video.session_privacy_mode,
-      {"auto"sv, "none"sv, "disable_outputs"sv, "kwin_per_output_lock"sv, "kwin_standalone_session"sv}
+      {
+        "auto"sv,
+        "none"sv,
+        "disable_outputs"sv,
+        "kwin_per_output_lock"sv,
+        "kwin_standalone_session"sv,
+        "mutter_per_output_lock"sv,
+        "mutter_standalone_session"sv,
+        "wlroots_per_output_lock"sv,
+      }
     );
 
     generic_f(vars, "dd_configuration_option", video.dd.configuration_option, dd::config_option_from_view);
