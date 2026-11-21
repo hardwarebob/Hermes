@@ -994,7 +994,7 @@ std::string get_local_ip_for_gateway() {
     controller = create_local_session_controller(config::video.session_privacy_mode);
     if (controller) {
       std::string out_name = config::video.output_name;
-      if (out_name.empty() && config::video.virtual_display_backend == "hermes_kms") {
+      if ((out_name.empty() || out_name == "HERMES-1") && config::video.virtual_display_backend == "hermes_kms") {
         out_name = "Virtual-1";
       }
       controller->on_stream_starting("Client", out_name, {});
