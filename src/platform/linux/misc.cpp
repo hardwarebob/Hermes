@@ -56,6 +56,7 @@
 #include "graphics.h"
 #include "misc.h"
 #include "local_session_controller.h"
+#include "src/rtsp.h"
 #include "process_group.h"
 #include "service_lifecycle.h"
 #include "session_attach.h"
@@ -997,7 +998,9 @@ std::string get_local_ip_for_gateway() {
       if ((out_name.empty() || out_name == "HERMES-1") && config::video.virtual_display_backend == "hermes_kms") {
         out_name = "Virtual-1";
       }
-      controller->on_stream_starting("Client", out_name, {});
+      controller->on_stream_starting("Client", out_name, [] {
+        rtsp_stream::terminate_sessions();
+      });
     }
   }
 
