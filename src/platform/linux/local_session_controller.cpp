@@ -4,6 +4,7 @@
  */
 #include "local_session_controller.h"
 
+#include "misc.h"
 #include "src/logging.h"
 
 #include <atomic>
@@ -62,7 +63,7 @@ namespace platf {
 
       bool is_available() const override {
         sd_bus *bus = nullptr;
-        if (sd_bus_open_user(&bus) < 0 || !bus) {
+        if (platf::open_user_bus(&bus) < 0 || !bus) {
           return false;
         }
         sd_bus_error err = SD_BUS_ERROR_NULL;
@@ -91,7 +92,7 @@ namespace platf {
         on_stream_stopping();
 
         std::lock_guard lg(m_mutex);
-        if (sd_bus_open_user(&m_bus) < 0 || !m_bus) {
+        if (platf::open_user_bus(&m_bus) < 0 || !m_bus) {
           BOOST_LOG(warning) << m_name << ": failed to open user D-Bus";
           return false;
         }
