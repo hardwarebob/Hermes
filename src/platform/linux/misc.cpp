@@ -55,6 +55,7 @@
 #include "clipboard_process.h"
 #include "graphics.h"
 #include "misc.h"
+#include "local_session_controller.h"
 #include "process_group.h"
 #include "service_lifecycle.h"
 #include "session_attach.h"
@@ -978,13 +979,29 @@ std::string get_local_ip_for_gateway() {
 #endif
   }  // namespace
 
+  namespace {
+    std::unique_ptr<local_session_controller_t> &active_session_controller() {
+      static std::unique_ptr<local_session_controller_t> controller;
+      return controller;
+    }
+  }  // namespace
+
   void streaming_will_start() {
     if (config::sunshine.inhibit_screen_lock) {
       inhibit_screen_lock();
     }
+    auto &controller = active_session_controller();
+    controller = create_local_session_controller(config::video.session_privacy_mode);
+    if (controller) {
+      controller->on_stream_starting("Client", config::video.output_name, {});
+    }
   }
 
   void streaming_will_stop() {
+    if (auto &controller = active_session_controller()) {
+      controller->on_stream_stopping();
+      controller.reset();
+    }
     // Uninhibit even when the setting was just turned off, so the bus
     // connection cannot outlive the configuration that opened it.
     uninhibit_screen_lock();
