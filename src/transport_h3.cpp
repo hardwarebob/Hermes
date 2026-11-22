@@ -119,7 +119,9 @@ namespace transport_h3 {
       uint16_t target_port {0};
       std::string path;
       std::string auth_header;
-      std::deque<std::vector<uint8_t>> to_quic;
+      std::deque<std::vector<uint8_t>> to_quic_unsent;
+      std::deque<std::vector<uint8_t>> to_quic_unacked;
+      std::deque<std::vector<uint8_t>> to_tcp;
       bool tcp_eof {false};
       bool quic_eof {false};
       bool response_sent {false};
@@ -195,7 +197,7 @@ namespace transport_h3 {
         return NGHTTP3_ERR_WOULDBLOCK;
       }
       auto &st = *it->second;
-      if (st.to_quic.empty()) {
+      if (st.to_quic_unsent.empty()) {
         if (st.tcp_eof) {
           *pflags |= NGHTTP3_DATA_FLAG_EOF;
           return 0;
@@ -203,15 +205,16 @@ namespace transport_h3 {
         return NGHTTP3_ERR_WOULDBLOCK;
       }
       size_t count = 0;
-      for (const auto &chunk : st.to_quic) {
-        if (count >= veccnt) {
-          break;
-        }
-        vec[count].base = const_cast<uint8_t *>(chunk.data());
-        vec[count].len = chunk.size();
+      while (!st.to_quic_unsent.empty() && count < veccnt) {
+        auto chunk = std::move(st.to_quic_unsent.front());
+        st.to_quic_unsent.pop_front();
+        st.to_quic_unacked.push_back(std::move(chunk));
+        auto &back = st.to_quic_unacked.back();
+        vec[count].base = back.data();
+        vec[count].len = back.size();
         ++count;
       }
-      if (st.tcp_eof && count == st.to_quic.size()) {
+      if (st.tcp_eof && st.to_quic_unsent.empty()) {
         *pflags |= NGHTTP3_DATA_FLAG_EOF;
       }
       return static_cast<nghttp3_ssize>(count);
@@ -227,21 +230,10 @@ namespace transport_h3 {
     ) {
       auto *peer = static_cast<h3_peer_conn_t *>(conn_user_data);
       auto it = peer->streams.find(stream_id);
-      if (it == peer->streams.end() || !it->second || it->second->tcp_fd < 0) {
+      if (it == peer->streams.end() || !it->second || it->second->tcp_fd < 0 || datalen == 0) {
         return 0;
       }
-      const int fd = it->second->tcp_fd;
-      size_t off = 0;
-      while (off < datalen) {
-        const ssize_t w = ::send(fd, data + off, datalen - off, MSG_NOSIGNAL);
-        if (w < 0) {
-          if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            break;
-          }
-          break;
-        }
-        off += static_cast<size_t>(w);
-      }
+      it->second->to_tcp.emplace_back(data, data + datalen);
       return 0;
     }
 
@@ -257,7 +249,7 @@ namespace transport_h3 {
       if (it == peer->streams.end() || !it->second) {
         return 0;
       }
-      auto &q = it->second->to_quic;
+      auto &q = it->second->to_quic_unacked;
       uint64_t rem = datalen;
       while (rem > 0 && !q.empty()) {
         auto &front = q.front();
@@ -360,7 +352,8 @@ namespace transport_h3 {
          NGHTTP3_NV_FLAG_NONE}
       };
       nghttp3_data_reader dr {read_stream_data_cb};
-      nghttp3_conn_submit_response(h3, stream_id, resp_nva, 1, st.rejected ? nullptr : &dr);
+      const int ssrc = nghttp3_conn_submit_response(h3, stream_id, resp_nva, 1, st.rejected ? nullptr : &dr);
+      BOOST_LOG(info) << "HTTP/3 server stream " << stream_id << " path=" << st.path << " status=" << status_str << " submit_rc=" << ssrc;
       if (st.rejected) {
         st.tcp_eof = true;
       }
@@ -372,7 +365,7 @@ namespace transport_h3 {
       auto it = peer->streams.find(stream_id);
       if (it != peer->streams.end() && it->second) {
         it->second->quic_eof = true;
-        if (it->second->tcp_fd >= 0) {
+        if (it->second->tcp_fd >= 0 && it->second->to_tcp.empty()) {
           ::shutdown(it->second->tcp_fd, SHUT_WR);
         }
       }
@@ -407,7 +400,13 @@ namespace transport_h3 {
 
     int quic_handshake_completed_cb(ngtcp2_conn *, void *user_data) {
       auto *peer = static_cast<h3_peer_conn_t *>(user_data);
-      return bind_h3_control_streams(peer) == 0 ? 0 : NGTCP2_ERR_CALLBACK_FAILURE;
+      const int rc = bind_h3_control_streams(peer);
+      if (rc != 0) {
+        BOOST_LOG(error) << "HTTP/3: bind_h3_control_streams failed";
+        return NGTCP2_ERR_CALLBACK_FAILURE;
+      }
+      BOOST_LOG(info) << "HTTP/3: QUIC handshake completed (server=" << peer->is_server << ')';
+      return 0;
     }
 
     int quic_recv_stream_data_cb(
@@ -427,6 +426,8 @@ namespace transport_h3 {
       const int fin = (flags & NGTCP2_STREAM_DATA_FLAG_FIN) ? 1 : 0;
       const nghttp3_ssize consumed = nghttp3_conn_read_stream(peer->h3conn, stream_id, data, datalen, fin);
       if (consumed < 0) {
+        BOOST_LOG(error) << "HTTP/3 nghttp3_conn_read_stream err=" << nghttp3_strerror(static_cast<int>(consumed))
+                         << " stream=" << stream_id << " server=" << peer->is_server;
         return NGTCP2_ERR_CALLBACK_FAILURE;
       }
       ngtcp2_conn_extend_max_stream_offset(qconn, stream_id, static_cast<uint64_t>(consumed));
@@ -539,6 +540,7 @@ namespace transport_h3 {
         if (peer->h3conn && peer->h3_bound) {
           sveccnt = nghttp3_conn_writev_stream(peer->h3conn, &stream_id, &fin, vec.data(), vec.size());
           if (sveccnt < 0) {
+            BOOST_LOG(error) << "HTTP/3 nghttp3_conn_writev_stream err=" << nghttp3_strerror(static_cast<int>(sveccnt));
             return -1;
           }
         }
@@ -564,6 +566,8 @@ namespace transport_h3 {
             }
             continue;
           }
+          BOOST_LOG(error) << "HTTP/3 ngtcp2_conn_writev_stream err=" << ngtcp2_strerror(static_cast<int>(n))
+                           << " stream=" << stream_id << " server=" << peer->is_server;
           return -1;
         }
         if (peer->h3conn && stream_id >= 0 && datalen >= 0) {
@@ -572,7 +576,10 @@ namespace transport_h3 {
         if (n == 0) {
           break;
         }
-        ::sendto(peer->udp_fd, pkt.data(), static_cast<size_t>(n), 0, reinterpret_cast<const struct sockaddr *>(&peer->remote_addr), peer->remote_len);
+        const ssize_t sent = ::sendto(peer->udp_fd, pkt.data(), static_cast<size_t>(n), 0, reinterpret_cast<const struct sockaddr *>(&peer->remote_addr), peer->remote_len);
+        if (sent < 0) {
+          BOOST_LOG(error) << "HTTP/3 sendto failed server=" << peer->is_server << " err=" << std::strerror(errno);
+        }
       }
       return 0;
     }
@@ -592,12 +599,32 @@ namespace transport_h3 {
     void pump_peer_local_io(h3_peer_conn_t *peer) {
       std::array<uint8_t, 16384> buf {};
       for (auto &[sid, st] : peer->streams) {
-        if (!st || st->tcp_fd < 0 || st->tcp_eof) {
+        if (!st || st->tcp_fd < 0) {
+          continue;
+        }
+        while (!st->to_tcp.empty()) {
+          auto &front = st->to_tcp.front();
+          const ssize_t w = ::send(st->tcp_fd, front.data(), front.size(), MSG_NOSIGNAL);
+          if (w > 0) {
+            if (static_cast<size_t>(w) == front.size()) {
+              st->to_tcp.pop_front();
+            } else {
+              front.erase(front.begin(), front.begin() + w);
+              break;
+            }
+          } else {
+            break;
+          }
+        }
+        if (st->quic_eof && st->to_tcp.empty()) {
+          ::shutdown(st->tcp_fd, SHUT_WR);
+        }
+        if (st->tcp_eof) {
           continue;
         }
         const ssize_t n = ::recv(st->tcp_fd, buf.data(), buf.size(), 0);
         if (n > 0) {
-          st->to_quic.emplace_back(buf.begin(), buf.begin() + n);
+          st->to_quic_unsent.emplace_back(buf.begin(), buf.begin() + n);
           if (peer->h3conn) {
             nghttp3_conn_resume_stream(peer->h3conn, sid);
           }
@@ -684,7 +711,7 @@ namespace transport_h3 {
           }
 
           ngtcp2_version_cid vc {};
-          if (ngtcp2_pkt_decode_version_cid(&vc, pkt.data(), static_cast<size_t>(n), NGTCP2_MAX_CIDLEN) != 0) {
+          if (ngtcp2_pkt_decode_version_cid(&vc, pkt.data(), static_cast<size_t>(n), 16) != 0) {
             continue;
           }
           const std::string dcid_key(reinterpret_cast<const char *>(vc.dcid), vc.dcidlen);
@@ -787,7 +814,10 @@ namespace transport_h3 {
             nullptr
           };
           ngtcp2_pkt_info pi {};
-          ngtcp2_conn_read_pkt(peer->qconn, &path, &pi, pkt.data(), static_cast<size_t>(n), now_ns());
+          const int rrc = ngtcp2_conn_read_pkt(peer->qconn, &path, &pi, pkt.data(), static_cast<size_t>(n), now_ns());
+          if (rrc != 0) {
+            BOOST_LOG(warning) << "HTTP/3 server ngtcp2_conn_read_pkt: " << ngtcp2_strerror(rrc);
+          }
         }
       }
 
@@ -864,16 +894,14 @@ namespace transport_h3 {
     peer->udp_fd = udp_fd;
     std::memcpy(&peer->remote_addr, res->ai_addr, res->ai_addrlen);
     peer->remote_len = res->ai_addrlen;
-    peer->local_len = res->ai_addrlen;
-    if (res->ai_family == AF_INET) {
-      auto *sin = reinterpret_cast<struct sockaddr_in *>(&peer->local_addr);
-      sin->sin_family = AF_INET;
-      sin->sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    } else {
-      auto *sin6 = reinterpret_cast<struct sockaddr_in6 *>(&peer->local_addr);
-      sin6->sin6_family = AF_INET6;
-      sin6->sin6_addr = in6addr_loopback;
+    struct sockaddr_storage bind_local {};
+    bind_local.ss_family = static_cast<sa_family_t>(res->ai_family);
+    if (::bind(udp_fd, reinterpret_cast<struct sockaddr *>(&bind_local), res->ai_addrlen) != 0) {
+      std::cerr << "HTTP/3 proxy bind local UDP failed: " << std::strerror(errno) << '\n';
+      return 1;
     }
+    peer->local_len = sizeof(peer->local_addr);
+    ::getsockname(udp_fd, reinterpret_cast<struct sockaddr *>(&peer->local_addr), &peer->local_len);
 
     peer->ssl = SSL_new(ssl_ctx);
     if (!peer->ssl || ngtcp2_crypto_ossl_ctx_new(&peer->ossl_ctx, peer->ssl) != 0) {
@@ -1038,7 +1066,9 @@ namespace transport_h3 {
             break;
           }
           ngtcp2_pkt_info pi {};
-          if (ngtcp2_conn_read_pkt(peer->qconn, &path, &pi, pkt.data(), static_cast<size_t>(n), now_ns()) != 0) {
+          const int rrc = ngtcp2_conn_read_pkt(peer->qconn, &path, &pi, pkt.data(), static_cast<size_t>(n), now_ns());
+          if (rrc != 0) {
+            std::cerr << "HTTP/3 proxy ngtcp2_conn_read_pkt error: " << ngtcp2_strerror(rrc) << '\n';
             return 1;
           }
         }
@@ -1085,7 +1115,8 @@ namespace transport_h3 {
           }
           peer->streams.emplace(sid, std::move(st));
           nghttp3_data_reader dr {read_stream_data_cb};
-          nghttp3_conn_submit_request(peer->h3conn, sid, nva.data(), nva.size(), &dr, nullptr);
+          const int src = nghttp3_conn_submit_request(peer->h3conn, sid, nva.data(), nva.size(), &dr, nullptr);
+          BOOST_LOG(info) << "HTTP/3 proxy opened stream " << sid << " submit_rc=" << src;
         }
 
         // Read local UDP sockets -> queue QUIC DATAGRAMs
