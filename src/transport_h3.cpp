@@ -852,9 +852,16 @@ namespace transport_h3 {
     peer->udp_fd = udp_fd;
     std::memcpy(&peer->remote_addr, res->ai_addr, res->ai_addrlen);
     peer->remote_len = res->ai_addrlen;
-    ::connect(udp_fd, res->ai_addr, res->ai_addrlen);
-    peer->local_len = sizeof(peer->local_addr);
-    ::getsockname(udp_fd, reinterpret_cast<struct sockaddr *>(&peer->local_addr), &peer->local_len);
+    peer->local_len = res->ai_addrlen;
+    if (res->ai_family == AF_INET) {
+      auto *sin = reinterpret_cast<struct sockaddr_in *>(&peer->local_addr);
+      sin->sin_family = AF_INET;
+      sin->sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    } else {
+      auto *sin6 = reinterpret_cast<struct sockaddr_in6 *>(&peer->local_addr);
+      sin6->sin6_family = AF_INET6;
+      sin6->sin6_addr = in6addr_loopback;
+    }
 
     peer->ssl = SSL_new(ssl_ctx);
     if (!peer->ssl || ngtcp2_crypto_ossl_ctx_new(&peer->ossl_ctx, peer->ssl) != 0) {

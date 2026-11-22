@@ -731,6 +731,11 @@ namespace confighttp {
   bool authenticate(resp_https_t response, req_https_t request, bool needsRedirect = false) {
     if (!checkIPOrigin(response, request))
       return false;
+    if (auto header = request->header.find("authorization"); header != request->header.end()) {
+      if (auth::verify_bearer_token(header->second)) {
+        return true;
+      }
+    }
     // If credentials not set, redirect to welcome.
     if (config::sunshine.username.empty()) {
       send_redirect(response, request, "/welcome");

@@ -98,14 +98,19 @@ namespace transport {
           continue;
         }
         for (int i = 0; i < 2; ++i) {
-          if (fds[i].revents & (POLLERR | POLLHUP | POLLNVAL)) {
-            return;
+          if (fds[i].fd < 0) {
+            continue;
           }
+          const int dst = (i == 0) ? fd_b : fd_a;
           if (fds[i].revents & POLLIN) {
-            const int dst = (i == 0) ? fd_b : fd_a;
             const ssize_t n = ::read(fds[i].fd, buf.data(), buf.size());
             if (n <= 0) {
-              return;
+              ::shutdown(dst, SHUT_WR);
+              fds[i].fd = -1;
+              if (fds[0].fd < 0 && fds[1].fd < 0) {
+                return;
+              }
+              continue;
             }
             ssize_t off = 0;
             while (off < n) {
@@ -114,6 +119,12 @@ namespace transport {
                 return;
               }
               off += w;
+            }
+          } else if (fds[i].revents & (POLLERR | POLLHUP | POLLNVAL)) {
+            ::shutdown(dst, SHUT_WR);
+            fds[i].fd = -1;
+            if (fds[0].fd < 0 && fds[1].fd < 0) {
+              return;
             }
           }
         }
