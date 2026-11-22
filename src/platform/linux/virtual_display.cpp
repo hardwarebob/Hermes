@@ -11,6 +11,8 @@
  */
 
 // standard includes
+#include "local_session_controller.h"
+
 #include <atomic>
 #include <algorithm>
 #include <array>
@@ -8355,6 +8357,11 @@ namespace VDISPLAY {
     }
     // The capture descriptor says whether the driver reports frame colour,
     // and afterwards confirms the scanout.
+    platf::prepare_output_privacy_for_capture(
+      config::video.session_privacy_mode,
+      output,
+      config::video.session_privacy_lock_virtual_display
+    );
     const int capture_fd = hermesKmsOpenCapture(displayName);
     if (capture_fd < 0) {
       return false;

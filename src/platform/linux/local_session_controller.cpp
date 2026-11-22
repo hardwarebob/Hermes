@@ -477,4 +477,62 @@ namespace platf {
     return std::make_unique<noop_session_controller_t>(mode.empty() ? "none" : mode);
   }
 
+  bool prepare_output_privacy_for_capture(
+    const std::string &mode,
+    const std::string &output_name,
+    bool lock_virtual_display
+  ) {
+    if (output_name.empty()) {
+      return false;
+    }
+#ifdef SUNSHINE_BUILD_SDBUS
+    auto apply_spec = [&](const dbus_compositor_spec_t &spec) -> bool {
+      sd_bus *bus = nullptr;
+      if (platf::open_user_bus(&bus) < 0 || !bus) {
+        return false;
+      }
+      sd_bus_error err = SD_BUS_ERROR_NULL;
+      const int rc = sd_bus_call_method(
+        bus,
+        spec.service,
+        spec.path,
+        spec.iface,
+        spec.set_policies_method,
+        &err,
+        nullptr,
+        "sbb",
+        output_name.c_str(),
+        lock_virtual_display ? 0 : 1,
+        1
+      );
+      sd_bus_error_free(&err);
+      sd_bus_unref(bus);
+      return rc >= 0;
+    };
+
+    if (mode == "kwin_per_output_lock") {
+      return apply_spec(kwin_spec);
+    }
+    if (mode == "mutter_per_output_lock") {
+      return apply_spec(mutter_spec);
+    }
+    if (mode == "wlroots_per_output_lock") {
+      std::string cmd = "swaymsg output '" + output_name + "' dpms on" +
+                        (lock_virtual_display ? "" : " unlocked_while_locked on") + " >/dev/null 2>&1";
+      return std::system(cmd.c_str()) == 0;
+    }
+    if (mode == "auto") {
+      if (apply_spec(kwin_spec) || apply_spec(mutter_spec)) {
+        return true;
+      }
+      if (const char *swaysock = std::getenv("SWAYSOCK"); swaysock && *swaysock) {
+        std::string cmd = "swaymsg output '" + output_name + "' dpms on" +
+                          (lock_virtual_display ? "" : " unlocked_while_locked on") + " >/dev/null 2>&1";
+        return std::system(cmd.c_str()) == 0;
+      }
+    }
+#endif
+    return false;
+  }
+
 }  // namespace platf

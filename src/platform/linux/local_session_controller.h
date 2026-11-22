@@ -44,4 +44,10 @@ namespace platf {
    */
   std::unique_ptr<local_session_controller_t> create_local_session_controller(const std::string &mode);
 
+  bool prepare_output_privacy_for_capture(
+    const std::string &mode,
+    const std::string &output_name,
+    bool lock_virtual_display = false
+  );
+
 }  // namespace platf
