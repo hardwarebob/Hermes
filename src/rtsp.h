@@ -91,6 +91,23 @@ namespace rtsp_stream {
 #else
     uuid_util::uuid_t display_guid{};
 #endif
+
+    struct monitor_spec_t {
+      int width {0};
+      int height {0};
+      int fps {0};
+      bool enable_hdr {false};
+      std::string display_name;
+      std::string ping_payload;
+      bool session_scoped_virtual_display {false};
+#ifdef _WIN32
+      GUID display_guid {};
+#else
+      uuid_util::uuid_t display_guid {};
+#endif
+    };
+
+    std::vector<monitor_spec_t> extra_monitors;
   };
 
   /**

@@ -1818,6 +1818,76 @@ namespace proc {
     }
     BOOST_LOG(info) << "[VDISPLAY/Hermes-KMS] Experimental session-scoped output "
                     << display_name << " assigned to client " << launch_session->device_name;
+    if (!isolated_session && !launch_session->extra_monitors.empty()) {
+      int extra_scale = launch_session->scale_factor;
+      if (app.scale_factor != 100) {
+        extra_scale = app.scale_factor;
+      } else if (extra_scale == 100 && config::video.default_scale_factor != 100) {
+        extra_scale = config::video.default_scale_factor;
+      }
+
+      auto rollback_all = [&]() {
+        for (auto &extra : launch_session->extra_monitors) {
+          if (extra.session_scoped_virtual_display) {
+            VDISPLAY::removeVirtualDisplay(extra.display_guid);
+            extra.session_scoped_virtual_display = false;
+            extra.display_name.clear();
+          }
+        }
+        VDISPLAY::removeVirtualDisplay(launch_session->display_guid);
+        launch_session->session_virtual_display_cleanup_pending = false;
+        launch_session->session_scoped_virtual_display = false;
+        launch_session->display_name.clear();
+      };
+
+      for (size_t i = 0; i < launch_session->extra_monitors.size(); ++i) {
+        auto &extra = launch_session->extra_monitors[i];
+        if (apply_scale && extra_scale != 100) {
+          extra.width = static_cast<int>(static_cast<uint32_t>(extra.width * (static_cast<float>(extra_scale) / 100.0f)) & ~1U);
+          extra.height = static_cast<int>(static_cast<uint32_t>(extra.height * (static_cast<float>(extra_scale) / 100.0f)) & ~1U);
+        }
+        int extra_fps = extra.fps ? extra.fps : 60000;
+        if (extra_fps < 1000) {
+          extra_fps *= 1000;
+        }
+        if (config::video.double_refreshrate) {
+          extra_fps *= 2;
+        }
+
+        auto extra_uuid = device_uuid;
+        extra_uuid.b32[3] ^= static_cast<uint32_t>(i + 1);
+        const auto extra_uuid_str = extra_uuid.string();
+        const auto extra_name = device_name + "-" + std::to_string(i + 2);
+        const auto extra_display = VDISPLAY::createVirtualDisplay(
+          extra_uuid_str.c_str(),
+          extra_name.c_str(),
+          extra.width,
+          extra.height,
+          extra_fps,
+          extra_uuid,
+          session_owner_uid,
+          linux_virtual_display_layout(app.virtual_display_layout),
+          false
+        );
+        if (extra_display.empty()) {
+          rollback_all();
+          return 503;
+        }
+        VDISPLAY::changeDisplaySettings(extra_display.c_str(), extra.width, extra.height, extra_fps);
+        if (!VDISPLAY::activateVirtualDisplayOutput(extra_display)) {
+          BOOST_LOG(error) << "[VDISPLAY/Hermes-KMS] The compositor did not activate extra session output "
+                           << extra_display << "; rolling back session outputs.";
+          VDISPLAY::removeVirtualDisplay(extra_uuid);
+          rollback_all();
+          return 503;
+        }
+        extra.display_guid = extra_uuid;
+        extra.display_name = extra_display;
+        extra.session_scoped_virtual_display = true;
+        BOOST_LOG(info) << "[VDISPLAY/Hermes-KMS] Extra session-scoped output "
+                        << extra_display << " (track " << (i + 1) << ") assigned to client " << launch_session->device_name;
+      }
+    }
     if (config::video.isolated_virtual_display_option) {
       BOOST_LOG(warning) << "[VDISPLAY/Hermes-KMS] Host exclusive-display mode does not apply to "
                             "experimental session-scoped outputs; physical and other client "
@@ -3427,6 +3497,13 @@ namespace proc {
     auto fg = util::fail_guard([&]() {
 #ifndef _WIN32
       if (launch_session->session_virtual_display_cleanup_pending) {
+        for (auto &extra : launch_session->extra_monitors) {
+          if (extra.session_scoped_virtual_display) {
+            VDISPLAY::removeVirtualDisplay(extra.display_guid);
+            extra.session_scoped_virtual_display = false;
+            extra.display_name.clear();
+          }
+        }
         VDISPLAY::removeVirtualDisplay(launch_session->display_guid);
         launch_session->session_virtual_display_cleanup_pending = false;
         launch_session->session_scoped_virtual_display = false;

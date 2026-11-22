@@ -32,6 +32,7 @@ namespace stream {
   struct config_t {
     audio::config_t audio;
     video::config_t monitor;
+    std::vector<video::config_t> extra_monitors;
 
     int packetsize;
     int minRequiredFecPackets;

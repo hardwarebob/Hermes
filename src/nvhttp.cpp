@@ -527,6 +527,74 @@ namespace nvhttp {
     launch_session->enable_hdr = util::from_view(get_arg(args, "hdrMode", "0"));
     launch_session->virtual_display = util::from_view(get_arg(args, "virtualDisplay", "0")) || named_cert_p->always_use_virtual_display;
     launch_session->scale_factor = util::from_view(get_arg(args, "scaleFactor", "100"));
+
+    // Parse optional multi-monitor request: monitors=w0xh0xfps0,w1xh1xfps1,...
+    if (auto monitors_str = get_arg(args, "monitors", ""); !monitors_str.empty()) {
+      auto hdr_str = get_arg(args, "monitorsHdr", "");
+      std::vector<bool> hdr_flags;
+      if (!hdr_str.empty()) {
+        std::stringstream hdr_ss(hdr_str);
+        std::string flag;
+        while (std::getline(hdr_ss, flag, ',')) {
+          hdr_flags.push_back(atoi(flag.c_str()) != 0);
+        }
+      }
+
+      std::stringstream mon_ss(monitors_str);
+      std::string mon_entry;
+      size_t mon_idx = 0;
+      constexpr size_t kMaxTotalMonitors = 4;
+      while (std::getline(mon_ss, mon_entry, ',') && mon_idx < kMaxTotalMonitors) {
+        int mw = 0;
+        int mh = 0;
+        int mfps = 0;
+        std::stringstream part_ss(mon_entry);
+        std::string part;
+        int part_idx = 0;
+        while (std::getline(part_ss, part, 'x')) {
+          if (part_idx == 0) {
+            mw = atoi(part.c_str());
+          } else if (part_idx == 1) {
+            mh = atoi(part.c_str());
+          } else if (part_idx == 2) {
+            auto fps_val = atof(part.c_str());
+            if (fps_val > 0 && fps_val < 1000) {
+              fps_val *= 1000;
+            }
+            mfps = (int) fps_val;
+            break;
+          }
+          ++part_idx;
+        }
+        if (mw > 0 && mh > 0 && mfps > 0) {
+          const bool mhdr = mon_idx < hdr_flags.size() ? hdr_flags[mon_idx] : launch_session->enable_hdr;
+          if (mon_idx == 0) {
+            if (named_cert_p->display_mode.empty()) {
+              launch_session->width = mw;
+              launch_session->height = mh;
+              launch_session->fps = mfps;
+            }
+            launch_session->enable_hdr = mhdr;
+          } else {
+            rtsp_stream::launch_session_t::monitor_spec_t extra;
+            extra.width = mw;
+            extra.height = mh;
+            extra.fps = mfps;
+            extra.enable_hdr = mhdr;
+            if (named_cert_p->uuid != http::unique_id) {
+              unsigned char raw_payload[8];
+              RAND_bytes(raw_payload, sizeof(raw_payload));
+              extra.ping_payload = util::hex_vec(raw_payload);
+            }
+            launch_session->extra_monitors.push_back(std::move(extra));
+          }
+        }
+        ++mon_idx;
+      }
+      if (!launch_session->extra_monitors.empty()) {
+        BOOST_LOG(info) << "Multi-monitor session requested [" << (1 + launch_session->extra_monitors.size()) << " tracks]";
+      }
+    }
     launch_session->launch_mode = "normal";
 
     launch_session->client_do_cmds = named_cert_p->do_cmds;
@@ -1695,6 +1763,13 @@ namespace nvhttp {
 #ifdef __linux__
           // An output prepared above for this launch alone has no stream to release it.
           if (!isolated_launch && launch_session->session_virtual_display_cleanup_pending) {
+            for (auto &extra : launch_session->extra_monitors) {
+              if (extra.session_scoped_virtual_display) {
+                VDISPLAY::removeVirtualDisplay(extra.display_guid);
+                extra.session_scoped_virtual_display = false;
+                extra.display_name.clear();
+              }
+            }
             VDISPLAY::removeVirtualDisplay(launch_session->display_guid);
             launch_session->session_virtual_display_cleanup_pending = false;
             launch_session->session_scoped_virtual_display = false;

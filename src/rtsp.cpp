@@ -57,6 +57,13 @@ namespace rtsp_stream {
       return;
     }
     if (session.session_virtual_display_cleanup_pending) {
+      for (auto &extra : session.extra_monitors) {
+        if (extra.session_scoped_virtual_display) {
+          VDISPLAY::removeVirtualDisplay(extra.display_guid);
+          extra.session_scoped_virtual_display = false;
+          extra.display_name.clear();
+        }
+      }
       VDISPLAY::removeVirtualDisplay(session.display_guid);
       session.session_virtual_display_cleanup_pending = false;
       session.session_scoped_virtual_display = false;
@@ -974,6 +981,29 @@ namespace rtsp_stream {
       ss << "a=x-nv-video[0].refPicInvalidation:1"sv << std::endl;
     }
 
+    const size_t total_video_tracks = 1 + session.extra_monitors.size();
+    ss << "a=x-ss-video.maxTracks:" << total_video_tracks << std::endl;
+    if (!session.extra_monitors.empty()) {
+      const auto video_port = net::map_port(stream::VIDEO_STREAM_PORT);
+      auto emit_track_sdp = [&](size_t idx, int w, int h, int fps_milli, bool hdr) {
+        const int fps_hz = fps_milli >= 1000 ? (fps_milli / 1000) : fps_milli;
+        ss << "m=video " << video_port << " RTP/AVP 98" << std::endl;
+        ss << "a=control:streamid=video" << idx << std::endl;
+        ss << "a=x-ss-video[" << idx << "].width:" << w << std::endl;
+        ss << "a=x-ss-video[" << idx << "].height:" << h << std::endl;
+        ss << "a=x-ss-video[" << idx << "].fps:" << fps_hz << std::endl;
+        ss << "a=x-ss-video[" << idx << "].hdr:" << (hdr ? 1 : 0) << std::endl;
+        if (video::last_encoder_probe_supported_ref_frames_invalidation) {
+          ss << "a=x-nv-video[" << idx << "].refPicInvalidation:1" << std::endl;
+        }
+      };
+      emit_track_sdp(0, session.width, session.height, session.fps, session.enable_hdr);
+      for (size_t i = 0; i < session.extra_monitors.size(); ++i) {
+        const auto &m = session.extra_monitors[i];
+        emit_track_sdp(i + 1, m.width, m.height, m.fps, m.enable_hdr);
+      }
+    }
+
     if (video::active_hevc_mode != 1) {
       ss << "sprop-parameter-sets=AAAAAU"sv << std::endl;
     }
@@ -1047,10 +1077,28 @@ namespace rtsp_stream {
     std::string_view type {begin, (size_t) std::distance(begin, end)};
 
     std::uint16_t port;
+    std::string *ping_payload_override = nullptr;
     if (type == "audio"sv) {
       port = net::map_port(stream::AUDIO_STREAM_PORT);
-    } else if (type == "video"sv) {
+    } else if (type == "video"sv || type == "video0"sv) {
       port = net::map_port(stream::VIDEO_STREAM_PORT);
+    } else if (type.starts_with("video"sv)) {
+      const auto suffix = type.substr(5);
+      size_t track_idx = 0;
+      bool valid_idx = !suffix.empty();
+      for (char ch : suffix) {
+        if (ch < '0' || ch > '9') {
+          valid_idx = false;
+          break;
+        }
+        track_idx = track_idx * 10 + static_cast<size_t>(ch - '0');
+      }
+      if (!valid_idx || track_idx == 0 || track_idx > session.extra_monitors.size()) {
+        cmd_not_found(sock, session, std::move(req));
+        return;
+      }
+      port = net::map_port(stream::VIDEO_STREAM_PORT);
+      ping_payload_override = &session.extra_monitors[track_idx - 1].ping_payload;
     } else if (type == "control"sv) {
       port = net::map_port(stream::CONTROL_PORT);
     } else if (type == "mic"sv && config::audio.stream_mic) {
@@ -1082,7 +1130,7 @@ namespace rtsp_stream {
       payload_option.content = connect_data.data();
     } else {
       payload_option.option = const_cast<char *>("X-SS-Ping-Payload");
-      payload_option.content = session.av_ping_payload.data();
+      payload_option.content = ping_payload_override ? ping_payload_override->data() : session.av_ping_payload.data();
     }
 
     port_option.next = &payload_option;
@@ -1250,6 +1298,42 @@ namespace rtsp_stream {
       if (config::video.limit_framerate && warp_factor >= 2) {
         configuredBitrateKbps *= warp_factor;
         BOOST_LOG(info) << "Warp factor [" << warp_factor << "] engaged";
+      }
+
+      // Parse per-track video parameters for extra monitors (x-nv-video[i].*, etc.)
+      for (size_t i = 0; i < session.extra_monitors.size(); ++i) {
+        const size_t track_idx = i + 1;
+        const auto &spec = session.extra_monitors[i];
+        video::config_t track_cfg = config.monitor;
+        track_cfg.width = spec.width > 0 ? spec.width : config.monitor.width;
+        track_cfg.height = spec.height > 0 ? spec.height : config.monitor.height;
+        track_cfg.framerate = spec.fps > 0 ? (spec.fps >= 1000 ? spec.fps / 1000 : spec.fps) : config.monitor.framerate;
+        track_cfg.encodingFramerate = spec.fps > 0 ? (spec.fps >= 1000 ? spec.fps : spec.fps * 1000) : config.monitor.encodingFramerate;
+        track_cfg.dynamicRange = spec.enable_hdr ? 1 : 0;
+        track_cfg.display_name = spec.display_name;
+
+        auto read_track_arg = [&](std::string_view prefix, std::string_view suffix, auto &dst) {
+          const auto key = std::format("{}[{}].{}", prefix, track_idx, suffix);
+          if (auto it = args.find(key); it != args.end()) {
+            dst = util::from_view(it->second);
+          }
+        };
+        read_track_arg("x-nv-video", "clientViewportHt", track_cfg.height);
+        read_track_arg("x-nv-video", "clientViewportWd", track_cfg.width);
+        read_track_arg("x-nv-video", "maxFPS", track_cfg.framerate);
+        read_track_arg("x-nv-vqos", "bw.maximumBitrateKbps", track_cfg.bitrate);
+        read_track_arg("x-nv-video", "videoEncoderSlicesPerFrame", track_cfg.slicesPerFrame);
+        read_track_arg("x-nv-video", "maxNumReferenceFrames", track_cfg.numRefFrames);
+        read_track_arg("x-nv-video", "encoderCscMode", track_cfg.encoderCscMode);
+        read_track_arg("x-nv-vqos", "bitStreamFormat", track_cfg.videoFormat);
+        read_track_arg("x-nv-video", "dynamicRangeMode", track_cfg.dynamicRange);
+        read_track_arg("x-ss-video", "chromaSamplingType", track_cfg.chromaSamplingType);
+        read_track_arg("x-ss-video", "intraRefresh", track_cfg.enableIntraRefresh);
+
+        if (config::video.max_bitrate > 0 && config::video.max_bitrate < track_cfg.bitrate) {
+          track_cfg.bitrate = config::video.max_bitrate;
+        }
+        config.extra_monitors.push_back(std::move(track_cfg));
       }
 
     } catch (std::out_of_range &) {

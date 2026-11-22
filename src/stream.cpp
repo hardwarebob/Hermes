@@ -374,9 +374,18 @@ namespace stream {
 #ifdef __linux__
       if (isolated_session) {
         proc::proc.disconnect_isolated(isolated_runtime_owner_id);
-      } else if (session_scoped_virtual_display) {
-        if (!VDISPLAY::removeVirtualDisplay(display_guid)) {
-          BOOST_LOG(warning) << "Failed to release session-scoped virtual display " << display_name;
+      } else {
+        for (auto &track : extra_video_tracks) {
+          if (track && track->session_scoped_virtual_display) {
+            if (!VDISPLAY::removeVirtualDisplay(track->display_guid)) {
+              BOOST_LOG(warning) << "Failed to release extra session-scoped virtual display " << track->display_name;
+            }
+          }
+        }
+        if (session_scoped_virtual_display) {
+          if (!VDISPLAY::removeVirtualDisplay(display_guid)) {
+            BOOST_LOG(warning) << "Failed to release session-scoped virtual display " << display_name;
+          }
         }
       }
 #endif
@@ -397,20 +406,38 @@ namespace stream {
 
     boost::asio::ip::address localAddress;
 
-    struct {
+    struct video_track_t {
+      session_t *session {nullptr};
+      uint32_t track_id {0};
+
       std::string ping_payload;
 
-      int lowseq;
+      int lowseq {0};
       udp::endpoint peer;
 
       std::optional<crypto::cipher::gcm_t> cipher;
-      std::uint64_t gcm_iv_counter;
+      std::uint64_t gcm_iv_counter {0};
 
+      safe::mail_t mail;
+      safe::mail_raw_t::event_t<bool> shutdown_event;
       safe::mail_raw_t::event_t<bool> idr_events;
       safe::mail_raw_t::event_t<std::pair<int64_t, int64_t>> invalidate_ref_frames_events;
 
       std::unique_ptr<platf::deinit_t> qos;
-    } video;
+      std::thread thread;
+      video::config_t monitor;
+
+      bool session_scoped_virtual_display {false};
+      std::string display_name;
+#ifdef _WIN32
+      GUID display_guid {};
+#else
+      uuid_util::uuid_t display_guid {};
+#endif
+    };
+
+    video_track_t video;
+    std::vector<std::unique_ptr<video_track_t>> extra_video_tracks;
 
     struct {
       crypto::cipher::cbc_t cipher;
@@ -1059,14 +1086,31 @@ namespace stream {
         << "---end stats---";
     });
 
-    server->map(packetTypes[IDX_REQUEST_IDR_FRAME], [&](session_t *session, const std::string_view &payload) {
+    auto target_video_track = [](session_t *session, uint32_t track_id) -> session_t::video_track_t * {
+      if (track_id == 0) {
+        return &session->video;
+      }
+      const size_t idx = track_id - 1;
+      if (idx < session->extra_video_tracks.size() && session->extra_video_tracks[idx]) {
+        return session->extra_video_tracks[idx].get();
+      }
+      return nullptr;
+    };
+
+    server->map(packetTypes[IDX_REQUEST_IDR_FRAME], [target_video_track](session_t *session, const std::string_view &payload) {
       BOOST_LOG(debug) << "type [IDX_REQUEST_IDR_FRAME]"sv;
       note_recovery_after_silence(*session, "a key frame"sv);
 
-      session->video.idr_events->raise(true);
+      uint32_t track_id = 0;
+      if (payload.size() >= sizeof(uint32_t)) {
+        std::memcpy(&track_id, payload.data(), sizeof(uint32_t));
+      }
+      if (auto *track = target_video_track(session, track_id)) {
+        track->idr_events->raise(true);
+      }
     });
 
-    server->map(packetTypes[IDX_INVALIDATE_REF_FRAMES], [&](session_t *session, const std::string_view &payload) {
+    server->map(packetTypes[IDX_INVALIDATE_REF_FRAMES], [target_video_track](session_t *session, const std::string_view &payload) {
       auto frames = (std::int64_t *) payload.data();
       auto firstFrame = frames[0];
       auto lastFrame = frames[1];
@@ -1078,7 +1122,13 @@ namespace stream {
 
       note_recovery_after_silence(*session, "reference frame invalidation"sv);
 
-      session->video.invalidate_ref_frames_events->raise(std::make_pair(firstFrame, lastFrame));
+      uint32_t track_id = 0;
+      if (payload.size() >= 2 * sizeof(std::int64_t) + sizeof(uint32_t)) {
+        std::memcpy(&track_id, payload.data() + 2 * sizeof(std::int64_t), sizeof(uint32_t));
+      }
+      if (auto *track = target_video_track(session, track_id)) {
+        track->invalidate_ref_frames_events->raise(std::make_pair(firstFrame, lastFrame));
+      }
     });
 
     server->map(packetTypes[IDX_INPUT_DATA], [&](session_t *session, const std::string_view &payload) {
@@ -1515,8 +1565,9 @@ namespace stream {
 
       frame_network_latency_logger.first_point_now();
 
-      auto session = (session_t *) packet->channel_data;
-      auto lowseq = session->video.lowseq;
+      auto *track = (session_t::video_track_t *) packet->channel_data;
+      auto session = track->session;
+      auto lowseq = track->lowseq;
 
       std::string_view payload {(char *) packet->data(), packet->data_size()};
       std::vector<uint8_t> payload_with_replacements;
@@ -1670,10 +1721,10 @@ namespace stream {
 
           frame_fec_latency_logger.first_point_now();
           // If video encryption is enabled, we allocate space for the encryption header before each shard
-          auto shards = fec::encode(current_payload, blocksize, fecPercentage, session->config.minRequiredFecPackets, session->video.cipher ? sizeof(video_packet_enc_prefix_t) : 0);
+          auto shards = fec::encode(current_payload, blocksize, fecPercentage, session->config.minRequiredFecPackets, track->cipher ? sizeof(video_packet_enc_prefix_t) : 0);
           frame_fec_latency_logger.second_point_now_and_log();
 
-          auto peer_address = session->video.peer.address();
+          auto peer_address = track->peer.address();
           auto batch_info = platf::batched_send_info_t {
             shards.headers.begin(),
             shards.prefixsize,
@@ -1683,7 +1734,7 @@ namespace stream {
             0,
             (uintptr_t) sock.native_handle(),
             peer_address,
-            session->video.peer.port(),
+            track->peer.port(),
             session->localAddress,
           };
 
@@ -1716,7 +1767,7 @@ namespace stream {
             inspect->packet.frameIndex = packet->frame_index();
 
             // Encrypt this shard if video encryption is enabled
-            if (session->video.cipher) {
+            if (track->cipher) {
               // We use the deterministic IV construction algorithm specified in NIST SP 800-38D
               // Section 8.2.1. The sequence number is our "invocation" field and the 'V' in the
               // high bytes is the "fixed" field. Because each client provides their own unique
@@ -1725,15 +1776,15 @@ namespace stream {
               //
               // The IV counter is 64 bits long which allows for 2^64 encrypted video packets
               // to be sent to each client before the IV repeats.
-              std::copy_n((uint8_t *) &session->video.gcm_iv_counter, sizeof(session->video.gcm_iv_counter), std::begin(iv));
-              iv[11] = 'V';  // Video stream
-              session->video.gcm_iv_counter++;
+              std::copy_n((uint8_t *) &track->gcm_iv_counter, sizeof(track->gcm_iv_counter), std::begin(iv));
+              iv[11] = static_cast<uint8_t>('V' + track->track_id);  // Video stream track
+              track->gcm_iv_counter++;
 
               // Encrypt the target buffer in place
               auto *prefix = (video_packet_enc_prefix_t *) shards.prefix(x);
               prefix->frameNumber = packet->frame_index();
               std::copy(std::begin(iv), std::end(iv), prefix->iv);
-              session->video.cipher->encrypt(std::string_view {(char *) inspect, (size_t) blocksize}, prefix->tag, (uint8_t *) inspect, &iv);
+              track->cipher->encrypt(std::string_view {(char *) inspect, (size_t) blocksize}, prefix->tag, (uint8_t *) inspect, &iv);
             }
 
             if (x - next_shard_to_send + 1 >= send_batch_size ||
@@ -1772,7 +1823,7 @@ namespace stream {
                     shards.blocksize,
                     (uintptr_t) sock.native_handle(),
                     peer_address,
-                    session->video.peer.port(),
+                    track->peer.port(),
                     session->localAddress,
                   };
 
@@ -1805,7 +1856,7 @@ namespace stream {
           session->video_loss.on_sent(shards.size());
         });
 
-        session->video.lowseq = lowseq;
+        track->lowseq = lowseq;
       } catch (const std::exception &e) {
         BOOST_LOG(error) << "Broadcast video failed "sv << e.what();
         std::this_thread::sleep_for(100ms);
@@ -2161,7 +2212,12 @@ namespace stream {
     return -1;
   }
 
-  void videoThread(session_t *session) {
+  void run_video_track(
+    session_t *session,
+    session_t::video_track_t &track,
+    safe::mail_t mail,
+    const video::config_t &monitor_cfg
+  ) {
     // If this is the first stop (the video handshake never completed), record
     // it as a handshake failure. If the session already stopped for another
     // reason, stop() keeps that earlier reason.
@@ -2172,17 +2228,25 @@ namespace stream {
     while_starting_do_nothing(session->state);
 
     auto ref = broadcast.ref();
-    auto error = recv_ping(session, ref, socket_e::video, session->video.ping_payload, session->video.peer, config::stream.ping_timeout);
+    auto error = recv_ping(session, ref, socket_e::video, track.ping_payload, track.peer, config::stream.ping_timeout);
     if (error < 0) {
       return;
     }
 
     // Enable local prioritization and QoS tagging on video traffic if requested by the client
-    auto address = session->video.peer.address();
-    session->video.qos = platf::enable_socket_qos(ref->video_sock.native_handle(), address, session->video.peer.port(), platf::qos_data_type_e::video, session->config.videoQosType != 0);
+    auto address = track.peer.address();
+    track.qos = platf::enable_socket_qos(ref->video_sock.native_handle(), address, track.peer.port(), platf::qos_data_type_e::video, session->config.videoQosType != 0);
 
-    BOOST_LOG(debug) << "Start capturing Video"sv;
-    video::capture(session->mail, session->config.monitor, session);
+    BOOST_LOG(debug) << "Start capturing Video track [" << track.track_id << ']';
+    video::capture(std::move(mail), monitor_cfg, &track);
+  }
+
+  void videoThread(session_t *session) {
+    run_video_track(session, session->video, session->mail, session->config.monitor);
+  }
+
+  void extraVideoTrackThread(session_t *session, session_t::video_track_t *track) {
+    run_video_track(session, *track, track->mail, track->monitor);
   }
 
   void audioThread(session_t *session) {
@@ -2346,6 +2410,11 @@ namespace stream {
       }
 
       session.shutdown_event->raise(true);
+      for (auto &track : session.extra_video_tracks) {
+        if (track && track->shutdown_event) {
+          track->shutdown_event->raise(true);
+        }
+      }
     }
 
     void graceful_stop(session_t& session) {
@@ -2398,6 +2467,11 @@ namespace stream {
       }
 
       session.shutdown_event->raise(true);
+      for (auto &track : session.extra_video_tracks) {
+        if (track && track->shutdown_event) {
+          track->shutdown_event->raise(true);
+        }
+      }
       session.controlEnd.raise(true);
     }
 
@@ -2418,6 +2492,11 @@ namespace stream {
 
       BOOST_LOG(debug) << "Waiting for video to end..."sv;
       session.videoThread.join();
+      for (auto &track : session.extra_video_tracks) {
+        if (track && track->thread.joinable()) {
+          track->thread.join();
+        }
+      }
       BOOST_LOG(debug) << "Waiting for audio to end..."sv;
       session.audioThread.join();
       BOOST_LOG(debug) << "Waiting for control to end..."sv;
@@ -2509,6 +2588,12 @@ namespace stream {
       auto addr = boost::asio::ip::make_address(addr_string);
       session.video.peer.address(addr);
       session.video.peer.port(0);
+      for (auto &track : session.extra_video_tracks) {
+        if (track) {
+          track->peer.address(addr);
+          track->peer.port(0);
+        }
+      }
 
       session.audio.peer.address(addr);
       session.audio.peer.port(0);
@@ -2525,6 +2610,11 @@ namespace stream {
 
       session.audioThread = std::thread {audioThread, &session};
       session.videoThread = std::thread {videoThread, &session};
+      for (auto &track : session.extra_video_tracks) {
+        if (track) {
+          track->thread = std::thread {extraVideoTrackThread, &session, track.get()};
+        }
+      }
 
       session.state.store(state_e::RUNNING, std::memory_order_release);
 
@@ -2608,6 +2698,8 @@ namespace stream {
         false
       };
 
+      session->video.session = session.get();
+      session->video.track_id = 0;
       session->video.idr_events = mail->event<bool>(mail::idr);
       session->video.invalidate_ref_frames_events = mail->event<std::pair<int64_t, int64_t>>(mail::invalidate_ref_frames);
       session->video.lowseq = 0;
@@ -2619,6 +2711,36 @@ namespace stream {
           false
         };
         session->video.gcm_iv_counter = 0;
+      }
+
+      for (size_t i = 0; i < launch_session.extra_monitors.size(); ++i) {
+        auto &spec = launch_session.extra_monitors[i];
+        auto track = std::make_unique<session_t::video_track_t>();
+        track->session = session.get();
+        track->track_id = static_cast<uint32_t>(i + 1);
+        track->mail = std::make_shared<safe::mail_raw_t>();
+        track->shutdown_event = track->mail->event<bool>(mail::shutdown);
+        track->idr_events = track->mail->event<bool>(mail::idr);
+        track->invalidate_ref_frames_events = track->mail->event<std::pair<int64_t, int64_t>>(mail::invalidate_ref_frames);
+        track->lowseq = 0;
+        track->ping_payload = spec.ping_payload;
+        track->session_scoped_virtual_display = spec.session_scoped_virtual_display;
+        track->display_name = spec.display_name;
+        track->display_guid = spec.display_guid;
+        if (i < config.extra_monitors.size()) {
+          track->monitor = config.extra_monitors[i];
+        } else {
+          track->monitor = session->config.monitor;
+          track->monitor.display_name = spec.display_name;
+        }
+        if (config.encryptionFlagsEnabled & SS_ENC_VIDEO) {
+          track->cipher = crypto::cipher::gcm_t {
+            launch_session.gcm_key,
+            false
+          };
+          track->gcm_iv_counter = 0;
+        }
+        session->extra_video_tracks.push_back(std::move(track));
       }
 
       constexpr auto max_block_size = crypto::cipher::round_to_pkcs7_padded(2048);
