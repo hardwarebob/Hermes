@@ -39,6 +39,7 @@
 #include "nvhttp.h"
 #include "platform/common.h"
 #include "rtsp.h"
+#include "transport_h3.h"
 #include "utility.h"
 
 namespace transport {
@@ -445,6 +446,12 @@ namespace transport {
 #if defined(__linux__) && defined(SUNSHINE_BUILD_LIBSSH)
     if (config::sunshine.ssh_server_enabled || auth::transport_enabled("ssh")) {
       threads.emplace_back(run_ssh_server, shutdown_event);
+    }
+#endif
+
+#if defined(__linux__) && defined(SUNSHINE_BUILD_HTTP3)
+    if (config::sunshine.h3_server_enabled || auth::transport_enabled("http3")) {
+      threads.emplace_back(transport_h3::start);
     }
 #endif
 

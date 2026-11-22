@@ -92,6 +92,8 @@ set(SUNSHINE_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/auth.h"
         "${CMAKE_SOURCE_DIR}/src/transport.cpp"
         "${CMAKE_SOURCE_DIR}/src/transport.h"
+        "${CMAKE_SOURCE_DIR}/src/transport_h3.cpp"
+        "${CMAKE_SOURCE_DIR}/src/transport_h3.h"
         "${CMAKE_SOURCE_DIR}/src/nvhttp.cpp"
         "${CMAKE_SOURCE_DIR}/src/nvhttp.h"
         "${CMAKE_SOURCE_DIR}/src/httpcommon.cpp"

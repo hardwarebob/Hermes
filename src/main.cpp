@@ -21,6 +21,7 @@
 #include "process.h"
 #include "system_tray.h"
 #include "transport.h"
+#include "transport_h3.h"
 #include "upnp.h"
 #include "uuid.h"
 #include "video.h"
@@ -199,6 +200,26 @@ int main(int argc, char *argv[]) {
       socket_path = config::sunshine.cmd.argv[0];
     }
     return transport::run_stdio_proxy(socket_path);
+  }
+
+  if (config::sunshine.cmd.name == "h3-proxy"sv) {
+    std::string remote;
+    bool insecure = false;
+    std::string token;
+    std::string bind_addr = "127.0.0.1";
+    for (int i = 0; i < config::sunshine.cmd.argc; ++i) {
+      std::string_view arg(config::sunshine.cmd.argv[i]);
+      if (arg == "--insecure"sv) {
+        insecure = true;
+      } else if (arg == "--token"sv && i + 1 < config::sunshine.cmd.argc) {
+        token = config::sunshine.cmd.argv[++i];
+      } else if (arg == "--bind"sv && i + 1 < config::sunshine.cmd.argc) {
+        bind_addr = config::sunshine.cmd.argv[++i];
+      } else if (!arg.starts_with("-"sv) && remote.empty()) {
+        remote = std::string(arg);
+      }
+    }
+    return transport_h3::run_h3_proxy(remote, insecure, token, bind_addr);
   }
 
   auto log_deinit_guard = logging::init(config::sunshine.min_log_level, config::sunshine.log_file);

@@ -389,6 +389,14 @@ if(LIBSSH_FOUND)
     message(STATUS "Hermes auth/transport: libssh enabled (${LIBSSH_VERSION})")
 endif()
 
+pkg_check_modules(NGTCP2 QUIET libngtcp2 libngtcp2_crypto_ossl libnghttp3)
+if(NGTCP2_FOUND)
+    list(APPEND SUNSHINE_DEFINITIONS SUNSHINE_BUILD_HTTP3=1)
+    include_directories(SYSTEM ${NGTCP2_INCLUDE_DIRS})
+    list(APPEND SUNSHINE_EXTERNAL_LIBRARIES ${NGTCP2_LIBRARIES})
+    message(STATUS "Hermes transport: HTTP/3 (QUIC) enabled")
+endif()
+
 # Isolated sessions' microphones are streams on their private PipeWire servers.
 pkg_check_modules(PIPEWIRE libpipewire-0.3 REQUIRED)
 include_directories(SYSTEM ${PIPEWIRE_INCLUDE_DIRS})

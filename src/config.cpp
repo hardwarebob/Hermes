@@ -636,6 +636,8 @@ namespace config {
     false,  // ssh_server_enabled
     48022,  // ssh_server_port
     "",  // ssh_host_key
+    false,  // h3_server_enabled
+    48443,  // h3_server_port
   };
 
   bool endline(char ch) {
@@ -1438,6 +1440,10 @@ namespace config {
     int_between_f(vars, "ssh_server_port", ssh_port, {1, 65535});
     sunshine.ssh_server_port = static_cast<std::uint16_t>(ssh_port);
     path_f(vars, "ssh_host_key", sunshine.ssh_host_key);
+    bool_f(vars, "h3_server_enabled", sunshine.h3_server_enabled);
+    int h3_port = sunshine.h3_server_port;
+    int_between_f(vars, "h3_server_port", h3_port, {1, 65535});
+    sunshine.h3_server_port = static_cast<std::uint16_t>(h3_port);
     bool_f(vars, "enable_pairing", sunshine.enable_pairing);
     bool_f(vars, "enable_discovery", sunshine.enable_discovery);
     bool_f(vars, "envvar_compatibility_mode", sunshine.envvar_compatibility_mode);

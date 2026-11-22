@@ -333,6 +333,8 @@ namespace config {
     bool ssh_server_enabled;
     std::uint16_t ssh_server_port;
     std::string ssh_host_key;
+    bool h3_server_enabled;
+    std::uint16_t h3_server_port;
   };
 
   extern video_t video;
