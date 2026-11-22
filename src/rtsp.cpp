@@ -18,10 +18,12 @@ extern "C" {
 #include <utility>
 
 // lib includes
+#include <boost/algorithm/string.hpp>
 #include <boost/asio.hpp>
 #include <boost/bind.hpp>
 
 // local includes
+#include "auth.h"
 #include "config.h"
 #include "globals.h"
 #include "input.h"
@@ -983,6 +985,10 @@ namespace rtsp_stream {
 
     const size_t total_video_tracks = 1 + session.extra_monitors.size();
     ss << "a=x-ss-video.maxTracks:" << total_video_tracks << std::endl;
+    if (auth::transport_enabled("tcp_interleaved")) {
+      ss << "a=x-ss-transport.modes:udp,rtsp-interleaved" << std::endl;
+      ss << "a=x-ss-transport.tcpInterleaved:1" << std::endl;
+    }
     if (!session.extra_monitors.empty()) {
       const auto video_port = net::map_port(stream::VIDEO_STREAM_PORT);
       auto emit_track_sdp = [&](size_t idx, int w, int h, int fps_milli, bool hdr) {
@@ -1118,7 +1124,50 @@ namespace rtsp_stream {
     session_option.next = &port_option;
 
     // Moonlight merely requires 'server_port=<port>'
-    auto port_value = std::format("server_port={}", static_cast<int>(port));
+    std::string port_value = std::format("server_port={}", static_cast<int>(port));
+    if (auth::transport_enabled("tcp_interleaved")) {
+      for (auto opt = req->options; opt != nullptr; opt = opt->next) {
+        if (opt->option && boost::iequals(opt->option, "Transport") && opt->content) {
+          std::string_view tr {opt->content};
+          if (tr.find("RTP/AVP/TCP"sv) != std::string_view::npos) {
+            if (auto pos = tr.find("interleaved="sv); pos != std::string_view::npos) {
+              auto spec = tr.substr(pos + 12);
+              auto semi = spec.find(';');
+              if (semi != std::string_view::npos) {
+                spec = spec.substr(0, semi);
+              }
+              auto dash = spec.find('-');
+              uint8_t ch_data = 0;
+              if (dash != std::string_view::npos) {
+                ch_data = static_cast<uint8_t>(util::from_view(spec.substr(0, dash)));
+              } else {
+                ch_data = static_cast<uint8_t>(util::from_view(spec));
+              }
+              session.tcp_interleaved = true;
+              if (type == "audio"sv) {
+                session.audio_interleaved_channel = ch_data;
+              } else if (type == "control"sv) {
+                session.control_interleaved_channel = ch_data;
+              } else if (type == "mic"sv) {
+                session.mic_interleaved_channel = ch_data;
+              } else if (type == "video"sv || type == "video0"sv) {
+                session.video_interleaved_channel = ch_data;
+              } else if (type.starts_with("video"sv)) {
+                const size_t track_idx = static_cast<size_t>(util::from_view(type.substr(5)));
+                if (track_idx > 0) {
+                  if (session.extra_video_interleaved_channels.size() < track_idx) {
+                    session.extra_video_interleaved_channels.resize(track_idx, 0);
+                  }
+                  session.extra_video_interleaved_channels[track_idx - 1] = ch_data;
+                }
+              }
+              port_value = std::format("RTP/AVP/TCP;unicast;interleaved={}", spec);
+            }
+          }
+          break;
+        }
+      }
+    }
 
     port_option.option = const_cast<char *>("Transport");
     port_option.content = port_value.data();

@@ -626,6 +626,16 @@ namespace config {
     {},  // state commands
     {},  // server commands
     false,  // inhibit screen locking while a client is connected
+    "local",  // auth_providers
+    "hermes",  // pam_service
+    "",  // pam_allowed_users
+    "",  // ssh_authorized_keys
+    86400,  // token_ttl_seconds
+    "udp",  // transport_modes
+    "",  // unix_socket_path
+    false,  // ssh_server_enabled
+    48022,  // ssh_server_port
+    "",  // ssh_host_key
   };
 
   bool endline(char ch) {
@@ -1416,6 +1426,18 @@ namespace config {
     bool_f(vars, "system_tray", sunshine.system_tray);
     bool_f(vars, "hide_tray_controls", sunshine.hide_tray_controls);
     bool_f(vars, "inhibit_screen_lock", sunshine.inhibit_screen_lock);
+    string_f(vars, "auth_providers", sunshine.auth_providers);
+    string_f(vars, "pam_service", sunshine.pam_service);
+    string_f(vars, "pam_allowed_users", sunshine.pam_allowed_users);
+    path_f(vars, "ssh_authorized_keys", sunshine.ssh_authorized_keys);
+    int_between_f(vars, "token_ttl_seconds", sunshine.token_ttl_seconds, {0, std::numeric_limits<int>::max()});
+    string_f(vars, "transport_modes", sunshine.transport_modes);
+    path_f(vars, "unix_socket_path", sunshine.unix_socket_path);
+    bool_f(vars, "ssh_server_enabled", sunshine.ssh_server_enabled);
+    int ssh_port = sunshine.ssh_server_port;
+    int_between_f(vars, "ssh_server_port", ssh_port, {1, 65535});
+    sunshine.ssh_server_port = static_cast<std::uint16_t>(ssh_port);
+    path_f(vars, "ssh_host_key", sunshine.ssh_host_key);
     bool_f(vars, "enable_pairing", sunshine.enable_pairing);
     bool_f(vars, "enable_discovery", sunshine.enable_discovery);
     bool_f(vars, "envvar_compatibility_mode", sunshine.envvar_compatibility_mode);

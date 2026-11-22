@@ -445,6 +445,26 @@ namespace nvhttp {
     }
   }
 
+  bool register_authorized_client_pem(
+    const std::string &cert_pem,
+    const std::string &unique_id,
+    const std::string &device_name,
+    std::string &error_out
+  ) {
+    auto x509 = crypto::x509(cert_pem);
+    if (!x509) {
+      error_out = "Invalid client PEM certificate";
+      return false;
+    }
+    auto named_cert_p = std::make_shared<crypto::named_cert_t>();
+    named_cert_p->name = device_name.empty() ? "HermesClient"s : device_name;
+    named_cert_p->cert = cert_pem;
+    named_cert_p->uuid = unique_id.empty() ? uuid_util::uuid_t::generate().string() : unique_id;
+    named_cert_p->perm = crypto::PERM::_all;
+    add_authorized_client(named_cert_p);
+    return true;
+  }
+
   std::shared_ptr<rtsp_stream::launch_session_t> make_launch_session(bool host_audio, bool input_only, const args_t &args, const crypto::named_cert_t* named_cert_p) {
     auto launch_session = std::make_shared<rtsp_stream::launch_session_t>();
 

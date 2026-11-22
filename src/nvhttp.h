@@ -96,6 +96,16 @@ namespace nvhttp {
    */
   bool verify_paired_client_certificate(X509 *certificate, crypto::p_named_cert_t &named_cert_out);
 
+  /**
+   * @brief Register a paired client PEM certificate directly (e.g. after PAM or SSH key auth).
+   */
+  bool register_authorized_client_pem(
+    const std::string &cert_pem,
+    const std::string &unique_id,
+    const std::string &device_name,
+    std::string &error_out
+  );
+
   struct hestia_session_prepare_t {
     bool virtual_display = false;
     int width = 0;

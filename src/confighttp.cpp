@@ -48,6 +48,7 @@
 
 // local includes
 #include "audio.h"
+#include "auth.h"
 #include "config.h"
 #include "confighttp.h"
 #include "crypto.h"
@@ -754,6 +755,12 @@ namespace confighttp {
       return true;
     }
 #endif
+    if (auto header = request->header.find("authorization"); header != request->header.end()) {
+      if (auth::verify_bearer_token(header->second)) {
+        fg.disable();
+        return true;
+      }
+    }
     if (sessionCookie.empty())
       return false;
     // Check for expiry
@@ -4171,9 +4178,25 @@ fi')CLIP";
       nlohmann::json input_tree = nlohmann::json::parse(ss.str());
       std::string username = input_tree.value("username", "");
       std::string password = input_tree.value("password", "");
-      std::string hash = util::hex(crypto::hash(password + config::sunshine.salt)).to_string();
-      if (!boost::iequals(username, config::sunshine.username) || hash != config::sunshine.password)
+      std::string auth_method = input_tree.value("auth_method", "auto");
+
+      bool authenticated = false;
+      if (auth_method == "local" || auth_method == "auto") {
+        if (auth::provider_enabled("local")) {
+          std::string hash = util::hex(crypto::hash(password + config::sunshine.salt)).to_string();
+          if (boost::iequals(username, config::sunshine.username) && hash == config::sunshine.password) {
+            authenticated = true;
+          }
+        }
+      }
+      if (!authenticated && (auth_method == "pam" || auth_method == "auto")) {
+        if (auth::provider_enabled("pam")) {
+          authenticated = auth::authenticate_pam(username, password).ok;
+        }
+      }
+      if (!authenticated) {
         return;
+      }
       std::string sessionCookieRaw = crypto::rand_alphabet(64);
       sessionCookie = util::hex(crypto::hash(sessionCookieRaw + config::sunshine.salt)).to_string();
       cookie_creation_time = std::chrono::steady_clock::now();
@@ -4189,6 +4212,177 @@ fi')CLIP";
       fg.disable();
       return;
     }
+  }
+
+  void pamPair(resp_https_t response, req_https_t request) {
+    if (!checkIPOrigin(response, request) || !validateContentType(response, request, "application/json")) {
+      return;
+    }
+    if (!auth::provider_enabled("pam")) {
+      send_hestia_error(response, SimpleWeb::StatusCode::client_error_forbidden, "pam_disabled", "PAM authentication is not enabled");
+      return;
+    }
+    try {
+      std::stringstream ss;
+      ss << request->content.rdbuf();
+      auto body = nlohmann::json::parse(ss.str());
+      const auto username = body.value("username", "");
+      const auto password = body.value("password", "");
+      const auto unique_id = body.value("uniqueid", "");
+      const auto device_name = body.value("devicename", "PAM Client");
+      const auto client_cert = body.value("client_cert", "");
+
+      const auto pam_res = auth::authenticate_pam(username, password);
+      if (!pam_res.ok) {
+        send_hestia_error(response, SimpleWeb::StatusCode::client_error_unauthorized, "pam_failed", pam_res.error.c_str());
+        return;
+      }
+
+      nlohmann::json out;
+      out["status"] = true;
+      if (!client_cert.empty()) {
+        std::string err;
+        if (!nvhttp::register_authorized_client_pem(client_cert, unique_id, device_name, err)) {
+          send_hestia_error(response, SimpleWeb::StatusCode::client_error_bad_request, "invalid_cert", err.c_str());
+          return;
+        }
+        out["paired"] = true;
+      } else if (auth::provider_enabled("token")) {
+        auto [raw_tok, info] = auth::issue_token(device_name, unique_id);
+        out["token"] = raw_tok;
+        out["token_id"] = info.id;
+        out["expires_at"] = info.expires_at;
+      }
+      SimpleWeb::CaseInsensitiveMultimap headers {{"Content-Type", "application/json"}};
+      response->write(out.dump(), headers);
+    } catch (const std::exception &e) {
+      send_hestia_error(response, SimpleWeb::StatusCode::client_error_bad_request, "bad_request", e.what());
+    }
+  }
+
+  void sshChallenge(resp_https_t response, req_https_t request) {
+    if (!checkIPOrigin(response, request)) {
+      return;
+    }
+    if (!auth::provider_enabled("ssh_key")) {
+      send_hestia_error(response, SimpleWeb::StatusCode::client_error_forbidden, "ssh_auth_disabled", "SSH key authentication is not enabled");
+      return;
+    }
+    const auto args = request->parse_query_string();
+    const auto unique_id = nvhttp::get_arg(args, "uniqueid", "");
+    const auto ch = auth::create_ssh_challenge(unique_id);
+    nlohmann::json out {
+      {"status", true},
+      {"challenge_id", ch.challenge_id},
+      {"nonce", ch.nonce_b64},
+      {"namespace", "hermes-auth"},
+      {"expires_in", ch.expires_in_sec}
+    };
+    SimpleWeb::CaseInsensitiveMultimap headers {{"Content-Type", "application/json"}};
+    response->write(out.dump(), headers);
+  }
+
+  void sshVerify(resp_https_t response, req_https_t request) {
+    if (!checkIPOrigin(response, request) || !validateContentType(response, request, "application/json")) {
+      return;
+    }
+    if (!auth::provider_enabled("ssh_key")) {
+      send_hestia_error(response, SimpleWeb::StatusCode::client_error_forbidden, "ssh_auth_disabled", "SSH key authentication is not enabled");
+      return;
+    }
+    try {
+      std::stringstream ss;
+      ss << request->content.rdbuf();
+      auto body = nlohmann::json::parse(ss.str());
+      const auto challenge_id = body.value("challenge_id", "");
+      const auto public_key = body.value("public_key", "");
+      const auto signature = body.value("signature", "");
+      const auto unique_id = body.value("uniqueid", "");
+      const auto device_name = body.value("devicename", "SSH Client");
+      const auto client_cert = body.value("client_cert", "");
+
+      const auto res = auth::verify_ssh_challenge(challenge_id, public_key, signature, unique_id);
+      if (!res.ok) {
+        send_hestia_error(response, SimpleWeb::StatusCode::client_error_unauthorized, "ssh_verify_failed", res.error.c_str());
+        return;
+      }
+
+      nlohmann::json out;
+      out["status"] = true;
+      out["key_comment"] = res.key_comment;
+      if (!client_cert.empty()) {
+        std::string err;
+        if (!nvhttp::register_authorized_client_pem(client_cert, unique_id, device_name, err)) {
+          send_hestia_error(response, SimpleWeb::StatusCode::client_error_bad_request, "invalid_cert", err.c_str());
+          return;
+        }
+        out["paired"] = true;
+      } else if (auth::provider_enabled("token")) {
+        auto [raw_tok, info] = auth::issue_token(device_name, unique_id);
+        out["token"] = raw_tok;
+        out["token_id"] = info.id;
+        out["expires_at"] = info.expires_at;
+      }
+      SimpleWeb::CaseInsensitiveMultimap headers {{"Content-Type", "application/json"}};
+      response->write(out.dump(), headers);
+    } catch (const std::exception &e) {
+      send_hestia_error(response, SimpleWeb::StatusCode::client_error_bad_request, "bad_request", e.what());
+    }
+  }
+
+  void listTokens(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+    nlohmann::json arr = nlohmann::json::array();
+    for (const auto &tok : auth::list_tokens()) {
+      arr.push_back({
+        {"id", tok.id},
+        {"label", tok.label},
+        {"unique_id", tok.unique_id},
+        {"created_at", tok.created_at},
+        {"expires_at", tok.expires_at}
+      });
+    }
+    nlohmann::json out {{"status", true}, {"tokens", std::move(arr)}};
+    SimpleWeb::CaseInsensitiveMultimap headers {{"Content-Type", "application/json"}};
+    response->write(out.dump(), headers);
+  }
+
+  void createToken(resp_https_t response, req_https_t request) {
+    if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) {
+      return;
+    }
+    try {
+      std::stringstream ss;
+      ss << request->content.rdbuf();
+      auto body = nlohmann::json::parse(ss.str());
+      const auto label = body.value("label", "API Token");
+      const auto unique_id = body.value("unique_id", "");
+      const int ttl = body.value("ttl_seconds", -1);
+      auto [raw_tok, info] = auth::issue_token(label, unique_id, crypto::PERM::_all, ttl);
+      nlohmann::json out;
+      out["status"] = true;
+      out["token"] = raw_tok;
+      out["id"] = info.id;
+      out["label"] = info.label;
+      out["expires_at"] = info.expires_at;
+      SimpleWeb::CaseInsensitiveMultimap headers {{"Content-Type", "application/json"}};
+      response->write(out.dump(), headers);
+    } catch (const std::exception &e) {
+      send_hestia_error(response, SimpleWeb::StatusCode::client_error_bad_request, "bad_request", e.what());
+    }
+  }
+
+  void deleteToken(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+    const std::string id = request->path_match[1];
+    const bool removed = auth::revoke_token(id);
+    nlohmann::json out {{"status", removed}};
+    SimpleWeb::CaseInsensitiveMultimap headers {{"Content-Type", "application/json"}};
+    response->write(out.dump(), headers);
   }
 
   /**
@@ -4244,6 +4438,12 @@ fi')CLIP";
     server.resource["^/login/?$"]["GET"] = getLoginPage;
     server.resource["^/troubleshooting/?$"]["GET"] = getTroubleshootingPage;
     server.resource["^/api/login"]["POST"] = login;
+    server.resource["^/api/auth/pam/pair$"]["POST"] = pamPair;
+    server.resource["^/api/auth/ssh/challenge$"]["GET"] = sshChallenge;
+    server.resource["^/api/auth/ssh/verify$"]["POST"] = sshVerify;
+    server.resource["^/api/tokens$"]["GET"] = listTokens;
+    server.resource["^/api/tokens$"]["POST"] = createToken;
+    server.resource["^/api/tokens/([0-9a-fA-F]+)$"]["DELETE"] = deleteToken;
     server.resource["^/api/pin$"]["POST"] = savePin;
     server.resource["^/api/otp$"]["POST"] = getOTP;
     server.resource["^/api/apps$"]["GET"] = getApps;

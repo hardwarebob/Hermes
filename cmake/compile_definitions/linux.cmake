@@ -372,6 +372,23 @@ list(APPEND PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/third-party/glad/include/glad/gl.h"
         "${CMAKE_SOURCE_DIR}/third-party/glad/include/glad/egl.h")
 
+include(CheckIncludeFile)
+check_include_file("security/pam_appl.h" HAVE_PAM_APPL_H)
+find_library(PAM_LIBRARY pam)
+if(HAVE_PAM_APPL_H AND PAM_LIBRARY)
+    list(APPEND SUNSHINE_DEFINITIONS SUNSHINE_BUILD_PAM=1)
+    list(APPEND SUNSHINE_EXTERNAL_LIBRARIES ${PAM_LIBRARY})
+    message(STATUS "Hermes auth: Linux PAM enabled (${PAM_LIBRARY})")
+endif()
+
+pkg_check_modules(LIBSSH QUIET libssh)
+if(LIBSSH_FOUND)
+    list(APPEND SUNSHINE_DEFINITIONS SUNSHINE_BUILD_LIBSSH=1)
+    include_directories(SYSTEM ${LIBSSH_INCLUDE_DIRS})
+    list(APPEND SUNSHINE_EXTERNAL_LIBRARIES ${LIBSSH_LIBRARIES})
+    message(STATUS "Hermes auth/transport: libssh enabled (${LIBSSH_VERSION})")
+endif()
+
 # Isolated sessions' microphones are streams on their private PipeWire servers.
 pkg_check_modules(PIPEWIRE libpipewire-0.3 REQUIRED)
 include_directories(SYSTEM ${PIPEWIRE_INCLUDE_DIRS})

@@ -20,6 +20,7 @@
 #include "nvhttp.h"
 #include "process.h"
 #include "system_tray.h"
+#include "transport.h"
 #include "upnp.h"
 #include "uuid.h"
 #include "video.h"
@@ -189,6 +190,16 @@ int main(int argc, char *argv[]) {
     return platf::prelogin::command(argv[0], config::sunshine.cmd.argc, config::sunshine.cmd.argv);
   }
 #endif
+
+  if (config::sunshine.cmd.name == "proxy"sv) {
+    std::string socket_path;
+    if (config::sunshine.cmd.argc >= 2 && std::string_view(config::sunshine.cmd.argv[0]) == "--socket"sv) {
+      socket_path = config::sunshine.cmd.argv[1];
+    } else if (config::sunshine.cmd.argc >= 1 && config::sunshine.cmd.argv[0][0] != '-') {
+      socket_path = config::sunshine.cmd.argv[0];
+    }
+    return transport::run_stdio_proxy(socket_path);
+  }
 
   auto log_deinit_guard = logging::init(config::sunshine.min_log_level, config::sunshine.log_file);
   if (!log_deinit_guard) {
@@ -535,6 +546,7 @@ int main(int argc, char *argv[]) {
   std::thread httpThread {nvhttp::start};
   std::thread configThread {confighttp::start};
   std::thread rtspThread {rtsp_stream::start};
+  std::thread transportThread {transport::start};
 
 #ifdef __linux__
   // Started at boot, before anyone logged in, Hermes joins the graphical
@@ -572,6 +584,7 @@ int main(int argc, char *argv[]) {
   httpThread.join();
   configThread.join();
   rtspThread.join();
+  transportThread.join();
 
   task_pool.stop();
   task_pool.join();

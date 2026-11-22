@@ -108,6 +108,13 @@ namespace rtsp_stream {
     };
 
     std::vector<monitor_spec_t> extra_monitors;
+
+    bool tcp_interleaved {false};
+    uint8_t video_interleaved_channel {0};
+    uint8_t audio_interleaved_channel {2};
+    uint8_t control_interleaved_channel {4};
+    uint8_t mic_interleaved_channel {6};
+    std::vector<uint8_t> extra_video_interleaved_channels;
   };
 
   /**

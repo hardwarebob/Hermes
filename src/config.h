@@ -321,6 +321,18 @@ namespace config {
     /// inhibition is held through org.freedesktop.ScreenSaver on the D-Bus
     /// session bus.
     bool inhibit_screen_lock;
+
+    /// Flexible authentication & transport configuration
+    std::string auth_providers;
+    std::string pam_service;
+    std::string pam_allowed_users;
+    std::string ssh_authorized_keys;
+    int token_ttl_seconds;
+    std::string transport_modes;
+    std::string unix_socket_path;
+    bool ssh_server_enabled;
+    std::uint16_t ssh_server_port;
+    std::string ssh_host_key;
   };
 
   extern video_t video;
