@@ -25,7 +25,8 @@ namespace platf {
     virtual bool on_stream_starting(
       const std::string &client_name,
       const std::string &output_name,
-      std::function<void()> on_disconnect
+      std::function<void()> on_disconnect,
+      bool lock_virtual_display = false
     ) = 0;
 
     virtual void on_stream_stopping() = 0;

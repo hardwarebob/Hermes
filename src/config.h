@@ -98,6 +98,7 @@ namespace config {
     std::string hermes_kms_session_compositor;
     std::string isolation_method;
     std::string session_privacy_mode;
+    bool session_privacy_lock_virtual_display;
 
     struct dd_t {
       struct workarounds_t {

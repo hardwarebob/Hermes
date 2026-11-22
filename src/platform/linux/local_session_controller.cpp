@@ -34,7 +34,7 @@ namespace platf {
         return true;
       }
 
-      bool on_stream_starting(const std::string &, const std::string &, std::function<void()>) override {
+      bool on_stream_starting(const std::string &, const std::string &, std::function<void()>, bool) override {
         return true;
       }
 
@@ -129,7 +129,8 @@ namespace platf {
       bool on_stream_starting(
         const std::string &client_name,
         const std::string &output_name,
-        std::function<void()> on_disconnect
+        std::function<void()> on_disconnect,
+        bool lock_virtual_display
       ) override {
         on_stream_stopping();
 
@@ -143,7 +144,7 @@ namespace platf {
         m_on_disconnect = std::move(on_disconnect);
 
         if (m_configure_output_policies && !m_output_name.empty()) {
-          set_output_policies(m_bus, m_output_name, true, true);
+          set_output_policies(m_bus, m_output_name, !lock_virtual_display, true);
         }
 
         sd_bus_error err = SD_BUS_ERROR_NULL;
@@ -325,7 +326,8 @@ namespace platf {
       bool on_stream_starting(
         const std::string &client_name,
         const std::string &output_name,
-        std::function<void()> on_disconnect
+        std::function<void()> on_disconnect,
+        bool lock_virtual_display
       ) override {
         on_stream_stopping();
 
@@ -335,7 +337,7 @@ namespace platf {
         m_session_id = "hermes-wlroots-1";
         m_on_disconnect = std::move(on_disconnect);
 
-        if (!m_output_name.empty()) {
+        if (!m_output_name.empty() && !lock_virtual_display) {
           std::string cmd = "swaymsg output '" + m_output_name + "' unlocked_while_locked on >/dev/null 2>&1";
           std::system(cmd.c_str());
         }

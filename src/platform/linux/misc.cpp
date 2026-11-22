@@ -1000,7 +1000,7 @@ std::string get_local_ip_for_gateway() {
       }
       controller->on_stream_starting("Client", out_name, [] {
         rtsp_stream::terminate_sessions();
-      });
+      }, config::video.session_privacy_lock_virtual_display);
     }
   }
 

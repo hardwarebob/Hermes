@@ -506,6 +506,7 @@ namespace config {
     "plasma"s,  // hermes_kms_session_compositor
     "gamescope"s,  // isolation_method
     "auto"s,  // session_privacy_mode
+    false,  // session_privacy_lock_virtual_display
 
     {
       video_t::dd_t::config_option_e::disabled,  // configuration_option
@@ -1293,6 +1294,7 @@ namespace config {
         "wlroots_per_output_lock"sv,
       }
     );
+    bool_f(vars, "session_privacy_lock_virtual_display", video.session_privacy_lock_virtual_display);
 
     generic_f(vars, "dd_configuration_option", video.dd.configuration_option, dd::config_option_from_view);
     generic_f(vars, "dd_resolution_option", video.dd.resolution_option, dd::resolution_option_from_view);
