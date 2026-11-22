@@ -885,6 +885,7 @@ namespace transport_h3 {
     cbs.stream_close = quic_stream_close_cb;
     cbs.handshake_completed = quic_handshake_completed_cb;
     cbs.rand = rand_cb;
+    cbs.get_new_connection_id = get_new_cid_cb;
     cbs.update_key = ngtcp2_crypto_update_key_cb;
     cbs.delete_crypto_aead_ctx = ngtcp2_crypto_delete_crypto_aead_ctx_cb;
     cbs.delete_crypto_cipher_ctx = ngtcp2_crypto_delete_crypto_cipher_ctx_cb;
