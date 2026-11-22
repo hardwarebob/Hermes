@@ -314,9 +314,21 @@ namespace transport_h3 {
       st.response_sent = true;
 
       uint16_t port = 0;
-      constexpr std::string_view prefix = "/_hermes/tcp/";
-      if (st.path.rfind(prefix, 0) == 0) {
-        port = static_cast<uint16_t>(std::atoi(st.path.substr(prefix.size()).c_str()));
+      constexpr std::string_view tcp_prefix = "/_hermes/tcp/";
+      constexpr std::string_view svc_prefix = "/_hermes/svc/";
+      if (st.path.rfind(tcp_prefix, 0) == 0) {
+        port = static_cast<uint16_t>(std::atoi(st.path.substr(tcp_prefix.size()).c_str()));
+      } else if (st.path.rfind(svc_prefix, 0) == 0) {
+        const std::string_view svc = std::string_view(st.path).substr(svc_prefix.size());
+        if (svc == "http") {
+          port = net::map_port(nvhttp::PORT_HTTP);
+        } else if (svc == "https") {
+          port = net::map_port(nvhttp::PORT_HTTPS);
+        } else if (svc == "config") {
+          port = net::map_port(confighttp::PORT_HTTPS);
+        } else if (svc == "rtsp") {
+          port = net::map_port(rtsp_stream::RTSP_SETUP_PORT);
+        }
       }
 
       if (auth::provider_enabled("token") && !st.auth_header.empty()) {
@@ -951,13 +963,17 @@ namespace transport_h3 {
       return 1;
     }
 
-    // Bind local loopback TCP & UDP listeners for Hermes ports
-    const std::array<uint16_t, 4> tcp_ports {
-      net::map_port(nvhttp::PORT_HTTP),
-      net::map_port(nvhttp::PORT_HTTPS),
-      net::map_port(confighttp::PORT_HTTPS),
-      net::map_port(rtsp_stream::RTSP_SETUP_PORT)
+    struct tcp_listener_t {
+      int fd {-1};
+      uint16_t port {0};
+      const char *svc_name {"http"};
     };
+    const std::array<std::pair<uint16_t, const char *>, 4> tcp_ports {{
+      {net::map_port(nvhttp::PORT_HTTP), "http"},
+      {net::map_port(nvhttp::PORT_HTTPS), "https"},
+      {net::map_port(confighttp::PORT_HTTPS), "config"},
+      {net::map_port(rtsp_stream::RTSP_SETUP_PORT), "rtsp"},
+    }};
     const std::array<uint16_t, 4> udp_ports {
       net::map_port(stream::VIDEO_STREAM_PORT),
       net::map_port(stream::CONTROL_PORT),
@@ -965,12 +981,8 @@ namespace transport_h3 {
       net::map_port(stream::MIC_STREAM_PORT)
     };
 
-    struct tcp_listener_t {
-      int fd {-1};
-      uint16_t port {0};
-    };
     std::vector<tcp_listener_t> tcp_listeners;
-    for (uint16_t p : tcp_ports) {
+    for (auto [p, svc_name] : tcp_ports) {
       int lfd = ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
       if (lfd < 0) {
         continue;
@@ -982,7 +994,7 @@ namespace transport_h3 {
       laddr.sin_port = htons(p);
       ::inet_pton(AF_INET, bind_addr.c_str(), &laddr.sin_addr);
       if (::bind(lfd, reinterpret_cast<struct sockaddr *>(&laddr), sizeof(laddr)) == 0 && ::listen(lfd, 32) == 0) {
-        tcp_listeners.push_back({lfd, p});
+        tcp_listeners.push_back({lfd, p, svc_name});
       } else {
         ::close(lfd);
       }
@@ -1048,7 +1060,7 @@ namespace transport_h3 {
           st->stream_id = sid;
           st->tcp_fd = cfd;
           st->target_port = l.port;
-          st->path = "/_hermes/tcp/" + std::to_string(l.port);
+          st->path = std::string("/_hermes/svc/") + l.svc_name;
 
           std::vector<nghttp3_nv> nva = {
             {const_cast<uint8_t *>(reinterpret_cast<const uint8_t *>(":method")),
